@@ -1,0 +1,25 @@
+# ---------------------------------------------------------------------------
+# .gitignore —— 「今天你双休了吗？」发布卫生
+# 契约：docs/SPEC.md v1.2.1 §2（data/ 只含 index.json / companies.json /
+# schools.json，超限时才出现 companies-N.json / schools-N.json；backups/ 为
+# 编辑器运行时备份目录，不入库）。本文件**不得**忽略任何交付文件。
+# ---------------------------------------------------------------------------
+
+# 编辑器运行时备份（add_prog/editor.py 保存前生成，可随时重新生成）
+backups/
+
+# Python 运行时缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 临时文件与备份副本（data/ 之外的 .bak 一律不入库）
+*.tmp
+*.bak
+
+# 操作系统杂项
+Thumbs.db
+.DS_Store
+
+# 本机智能体编排状态（与站点交付无关）
+.agent-teams/

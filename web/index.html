@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f5f6fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1016" media="(prefers-color-scheme: dark)">
+<meta name="description" content="今天你双休了吗？公司板块与学校板块，按键渲染的纯静态查询站点：数据来自 data/index.json 索引的分片文件，零依赖、零外链、可离线打开。">
+<title>今天你双休了吗？— 公司与学校双休情况查询</title>
+<link rel="stylesheet" href="styles.css">
+<!-- 空 data URI 图标：避免本地服务器与 Pages 上产生 favicon.ico 404 噪音；data: 不是外链 -->
+<link rel="icon" href="data:,">
+</head>
+<body class="app">
+
+<a class="skip-link" href="#board-root">跳到条目列表</a>
+
+<!-- ===== 站点页头（F1）：标题与副标题为静态文案，不依赖任何数据 ===== -->
+<header class="site-header">
+  <div class="wrap site-header__inner">
+    <div class="site-header__brand">
+      <p class="site-eyebrow">公司与学校 · 双休情况</p>
+      <h1 class="site-title">今天你双休了吗？</h1>
+      <p class="site-subtitle">收集公司岗位与学校作息的真实反馈，帮你判断这里是不是真的双休。</p>
+    </div>
+    <ul class="site-facts">
+      <li class="site-fact"><span class="site-fact__key">数据来源</span><span class="site-fact__value">data/index.json</span></li>
+      <li class="site-fact"><span class="site-fact__key">运行方式</span><span class="site-fact__value">纯静态 · 零依赖</span></li>
+      <li class="site-fact"><span class="site-fact__key">部署</span><span class="site-fact__value">GitHub Pages 子路径</span></li>
+    </ul>
+  </div>
+</header>
+
+<noscript>
+  <div class="wrap">
+    <p class="notice notice--warn">本站需要启用 JavaScript 才能读取 <code>data/index.json</code> 索引的分片数据并展示条目列表。</p>
+  </div>
+</noscript>
+
+<main class="wrap app-main">
+
+  <!-- ===== 板块切换（F5）：文字标识 + aria-pressed；URL 参数 board 由脚本同步 ===== -->
+  <section class="board-bar" aria-labelledby="board-title">
+    <h2 class="sr-only" id="board-title">选择板块</h2>
+    <div class="board-switch" id="board-switch" role="group" aria-label="板块切换">
+      <button class="board-switch__btn" type="button" data-board="companies" aria-pressed="true">公司</button>
+      <button class="board-switch__btn" type="button" data-board="schools" aria-pressed="false">学校</button>
+    </div>
+    <p class="board-bar__hint">切换板块后，关键词、状态与排序都会作用于当前板块的数据。</p>
+  </section>
+
+  <!-- ===== 工具栏（F6 / F7 / F8）：>=1024px 顶部粘性 ===== -->
+  <div class="toolbar" id="toolbar">
+    <div class="toolbar__inner" role="search" aria-label="搜索、筛选与排序">
+      <div class="field field--search">
+        <label class="field__label" for="search-input">关键词</label>
+        <div class="input-wrap">
+          <input class="input input--search" id="search-input" name="q" type="search"
+                 placeholder="名称、休息情况、岗位、评价内容…"
+                 autocomplete="off" spellcheck="false" enterkeyhint="search" aria-keyshortcuts="Escape"
+                 aria-describedby="search-hint">
+          <button class="input__clear" id="search-clear" type="button" aria-label="清空关键词" hidden>
+            <span aria-hidden="true">×</span>
+          </button>
+        </div>
+        <span class="sr-only" id="search-hint">按 Esc 键可清空关键词</span>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="sort-select">排序</label>
+        <div class="select-wrap">
+          <select class="input" id="sort-select" name="sort">
+            <option value="default">默认（数据顺序）</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- 无该键可筛选时由脚本加 hidden -->
+      <div class="field" id="status-filter">
+        <label class="field__label" for="status-filter-select">状态</label>
+        <div class="select-wrap">
+          <select class="input" id="status-filter-select" name="status">
+            <option value="">全部状态</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 结果区（F9 计数 + F10 四类状态 + F3/F4 挂载点） ===== -->
+  <section class="results" id="results" aria-labelledby="results-title">
+    <div class="section-head">
+      <h2 class="section-title" id="results-title">结果</h2>
+      <p class="result-count" id="result-count" aria-live="polite" aria-atomic="true">0 / 0</p>
+    </div>
+
+    <div class="board-root-holder">
+      <div class="state-region" id="state-region">
+        <!-- 离线快照提示（SPEC §4.3）：file:// 下由脚本移除 hidden -->
+        <div class="state-panel state-panel--offline" id="offline-note" role="status" hidden>
+          <span class="state-panel__icon" aria-hidden="true">i</span>
+          <p class="state-panel__title">离线快照模式</p>
+          <p class="state-panel__hint">浏览器不允许以 <code>file://</code> 打开时读取 <code>data/*.json</code>，当前展示的是内置只读快照 <code>web/data-snapshot.js</code>。要查看最新数据，请在仓库根目录运行 <code>python -m http.server 8000</code> 后访问 <code>web/index.html</code>。</p>
+        </div>
+
+        <!-- 状态一：加载中 -->
+        <div class="state-panel state-panel--loading" id="state-loading" role="status">
+          <span class="spinner" aria-hidden="true"></span>
+          <p class="state-panel__title">正在加载数据…</p>
+          <p class="state-panel__hint">先读取索引 <code>data/index.json</code>，再按索引顺序合并分片。</p>
+        </div>
+
+        <!-- 状态二：空结果（含清除筛选） -->
+        <div class="state-panel state-panel--empty" id="state-empty" hidden>
+          <span class="state-panel__icon" aria-hidden="true">∅</span>
+          <p class="state-panel__title">没有符合条件的条目</p>
+          <p class="state-panel__hint">试试减少关键词，或清除状态筛选后重新查看。</p>
+          <button class="btn btn--primary" id="empty-clear" type="button">清除筛选</button>
+        </div>
+
+        <!-- 状态三：加载失败（含重试） -->
+        <div class="state-panel state-panel--error" id="state-error" role="alert" hidden>
+          <span class="state-panel__icon" aria-hidden="true">!</span>
+          <p class="state-panel__title">数据加载失败</p>
+          <p class="state-panel__hint" id="error-message">无法读取 <code>data/index.json</code>。请确认通过本地静态服务器访问本页，并检查数据文件是否存在。</p>
+          <button class="btn btn--primary" id="retry-button" type="button">重试</button>
+        </div>
+      </div>
+
+      <!-- 当前板块内容挂载点：由脚本向其中写入 .card-grid 与 .entry 卡片 -->
+      <div class="board-root" id="board-root" aria-busy="true"></div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap site-footer__inner">
+    <p class="site-footer__note">
+      <strong>免责声明</strong>：本站数据来自<strong>公开渠道与社区整理的转述</strong>，可能存在时效性偏差或错漏，<strong>仅供参考</strong>，不构成对任何企业的定论；公开发布前请自行评估合规性。内容如有偏差，欢迎按 <code>docs/SPEC.md</code> 的字段表提交更正。
+    </p>
+    <p class="site-footer__meta">
+      数据目录 <code>data/</code>（索引 <code>index.json</code> + <code>companies.json</code> / <code>schools.json</code>，超限时拆分为 <code>companies-N.json</code> / <code>schools-N.json</code>） ·
+      离线兜底 <code>web/</code> 目录内的内置快照脚本 ·
+      规格契约 <code>docs/SPEC.md</code>
+    </p>
+  </div>
+</footer>
+
+<!-- ===== F13 / F14 全屏详情抽屉与评论（SPEC v1.3 §4.1 DOM 钩子 + §4.7）：默认 hidden，由脚本控制 =====
+     语义归属：SPEC §4.1 / §4.7.1 把 role="dialog" / aria-modal="true" 冻结在抽屉容器 #drawer 上，故此处落在 #drawer；
+     #drawer-panel 为内容面板（额外 BEM 类 .detail-panel 仅用于样式），其 aria-labelledby 同样指向抽屉标题。 -->
+<div class="detail-overlay" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden>
+  <div class="detail-panel" id="drawer-panel" aria-labelledby="drawer-title">
+    <header class="detail__head">
+      <h2 class="detail__title" id="drawer-title">条目详情</h2>
+      <button class="detail__close" id="drawer-close" type="button" aria-label="关闭">
+        <span class="detail__close-glyph" aria-hidden="true">×</span>
+      </button>
+    </header>
+
+    <!-- 条目完整按键渲染内容挂载点（§4.2 / §4.7.2 第 1 条）：由脚本写入 -->
+    <div class="detail__body" id="drawer-body"></div>
+
+    <!-- 评论区（§4.7.2 第 2 条）：#comment-list 为空时显示 .comment-empty（初始为空骨架，故不带 hidden） -->
+    <section class="detail__comments" aria-labelledby="detail-comments-title">
+      <h3 class="detail__comments-title" id="detail-comments-title">评论</h3>
+      <ul class="comment-list" id="comment-list"></ul>
+      <p class="comment-empty">暂无评论</p>
+
+      <!-- 写评论表单（§4.7.2 第 3 条 / §4.7.4）：提交拼成预填 GitHub Issue 链接，不写 data/ -->
+      <form class="comment-form" id="comment-form" novalidate>
+        <div class="comment-form__field">
+          <label class="comment-form__label" for="comment-content">评论内容（必填，最多 1000 字）</label>
+          <textarea class="comment-form__text" id="comment-content" name="content" rows="4" maxlength="1000" required
+                    placeholder="写下你了解的休息情况、岗位差异或补充信息…"></textarea>
+        </div>
+        <div class="comment-form__field">
+          <label class="comment-form__label" for="comment-nickname">昵称（可选，最多 40 字）</label>
+          <input class="comment-form__nick" id="comment-nickname" name="nickname" type="text" maxlength="40"
+                 autocomplete="nickname" placeholder="留空则显示「匿名」">
+        </div>
+        <button class="comment-form__submit" id="comment-submit" type="submit" disabled>提交评论</button>
+        <p class="comment-form__hint comment-form__hint--warn" id="comment-notice">需先在 data/index.json 的 site.repo 填写你的仓库</p>
+      </form>
+    </section>
+  </div>
+</div>
+
+<!-- 卡片与触发控件的冻结属性（SPEC v1.3 §4.1）：卡片根 data-entry="<条目名称>"、「更多信息」触发控件
+     <button type="button" data-more="<条目名称>">。下列 <template> 是属性契约的静态声明，脚本按键渲染时按同样形态输出；
+     template 内容不进入文档树，不影响渲染、查询与计数。 -->
+<template id="tpl-entry-card">
+  <article class="entry entry--company" data-entry="条目名称">
+    <div class="entry__head">
+      <h3 class="entry__title">条目名称</h3>
+      <div class="entry__actions">
+        <button class="entry__more" type="button" data-more="条目名称" aria-expanded="false" aria-controls="drawer">更多信息</button>
+      </div>
+    </div>
+  </article>
+</template>
+
+<!-- 脚本顺序冻结（SPEC §2.2 / §4.3）：先引入离线快照脚本（暴露 window.SHUANGXIU_SNAPSHOT），再引入页面逻辑脚本 -->
+<script src="data-snapshot.js" defer></script>
+<script src="app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "limits": {
+    "maxRecordsPerFile": 100,
+    "maxBytesPerFile": 262144
+  },
+  "companies": [
+    "companies.json"
+  ],
+  "schools": [
+    "schools.json"
+  ],
+  "comments": [
+    "comments.json"
+  ],
+  "site": {
+    "repo": "OWNER/REPO",
+    "issueLabel": "comment-submission"
+  }
+}

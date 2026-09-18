@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f5f6fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1016" media="(prefers-color-scheme: dark)">
+<meta name="description" content="今天你双休了吗？纯静态站点入口，自动跳转到 web/index.html。">
+<title>今天你双休了吗？— 入口</title>
+<!-- GitHub Pages 入口（docs/SPEC.md §2.1）：只做跳转，不承载业务逻辑、不写死数据。 -->
+<meta http-equiv="refresh" content="0; url=web/index.html">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f6fa;
+    --surface: #ffffff;
+    --border: #e3e6ef;
+    --text: #151925;
+    --text-2: #545b70;
+    --accent: #3a56c9;
+    --radius: 16px;
+    --shadow: 0 1px 2px rgba(19, 23, 42, 0.04), 0 10px 30px -14px rgba(19, 23, 42, 0.28);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1016;
+      --surface: #171a23;
+      --border: #282d3a;
+      --text: #eceef5;
+      --text-2: #a5abbd;
+      --accent: #8ea4ff;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.45), 0 12px 32px -16px rgba(0, 0, 0, 0.7);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 1.5rem;
+    background-color: var(--bg);
+    background-image: radial-gradient(900px 320px at 50% -120px, rgba(58, 86, 201, 0.1), transparent 70%);
+    background-repeat: no-repeat;
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+      "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    font-size: 16px;
+    line-height: 1.75;
+    letter-spacing: 0.01em;
+    text-align: center;
+  }
+  .box {
+    width: min(100%, 32rem);
+    padding: clamp(1.75rem, 5vw, 2.75rem) clamp(1.25rem, 5vw, 2.25rem);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+  h1 { margin: 0 0 0.5rem; font-size: 1.5rem; line-height: 1.35; }
+  p { margin: 0 0 1.5rem; color: var(--text-2); font-size: 0.9375rem; }
+  a.enter {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    padding: 0.6rem 1.4rem;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #ffffff;
+    font-weight: 600;
+    text-decoration: none;
+  }
+  a.enter:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<main class="box">
+  <h1>今天你双休了吗？</h1>
+  <p>正在进入站点（web/index.html）。如果没有自动跳转，请点击下面的链接。</p>
+  <a class="enter" href="web/index.html">点击这里进入</a>
+</main>
+</body>
+</html>

@@ -1,0 +1,107 @@
+# GitHub Action：把「评论提交」Issue 落盘进 data/comments.json
+# 契约：docs/SPEC.md v1.3 §3.9（评论数据）/ §4.7.3（Issue 模板，逐字冻结）/ §6 第 11 条（启用步骤）。
+#
+# 触发：issues 的 opened 与 labeled 两个事件。
+#   · opened  保证「不依赖 label 是否存在」——前端用
+#     https://github.com/<site.repo>/issues/new?...&labels=comment-submission 创建 Issue，
+#     即使仓库里还没建 comment-submission 标签，正文的固定标记也能让评论被处理，不会静默失败；
+#   · labeled 兼容「先建 Issue、后打标签」的用法。
+# 守卫（job 级 if）：正文含 <!-- comment-submission --> 或带 site.issueLabel 标签才处理，
+#   两者都不满足 → 整个 job 跳过（不评论、不关闭、不写文件）。
+# 权限：contents: write（提交数据变更）、issues: write（评论 / 关闭 / 打 invalid 标签）。
+#
+# 启用前必做：① 仓库 Settings → Labels 建标签 comment-submission（推荐，便于 labeled 入口）；
+#            ② 把 data/index.json 的 site.repo 改成自己的 OWNER/REPO。
+name: Comment submission
+
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: comment-submission-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    name: 解析并落盘评论
+    # 守卫 = 「正文含固定标记 或 带 comment-submission 标签」；
+    # 末尾的 !(...) 是防重复子句：Issue 创建时即打标会同时触发 opened 与 labeled 两个事件，
+    # 只要正文带标记就固定由 opened 处理，labeled 事件不再重复落盘（concurrency 只防并发，不防重复）。
+    if: ${{ (contains(github.event.issue.body || '', '<!-- comment-submission -->') || contains(github.event.issue.labels.*.name, 'comment-submission')) && !(github.event.action == 'labeled' && contains(github.event.issue.body || '', '<!-- comment-submission -->')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 准备 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 解析 Issue 并追加评论
+        id: ingest
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          ISSUE_LABELS: ${{ join(github.event.issue.labels.*.name, ',') }}
+        run: |
+          set -o pipefail
+          node tools/ingest-comment.mjs 2>&1 | tee "$RUNNER_TEMP/ingest.log"
+
+      - name: 提交数据变更
+        if: success() && steps.ingest.outputs.skipped != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data web/data-snapshot.js
+          if git diff --cached --quiet; then
+            echo "没有需要提交的变更"
+          else
+            git commit -m "chore(comments): 落盘 Issue #${{ github.event.issue.number }} 的评论（编号 ${{ steps.ingest.outputs.number }}）"
+            git push
+          fi
+
+      - name: 评论并关闭 Issue（成功）
+        if: success() && steps.ingest.outputs.skipped != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          {
+            echo "✅ 评论已写入 data/comments.json"
+            echo ""
+            echo "- 编号：${{ steps.ingest.outputs.number }}"
+            echo "- 板块：${{ steps.ingest.outputs.board }}"
+            echo "- 目标：${{ steps.ingest.outputs.target }}"
+            echo "- 日期：${{ steps.ingest.outputs.date }}"
+            echo "- 离线快照：${{ steps.ingest.outputs.snapshot }}"
+            echo ""
+            echo "感谢投稿，本 Issue 自动关闭。"
+          } > "$RUNNER_TEMP/success.md"
+          gh issue comment "$ISSUE_NUMBER" --body-file "$RUNNER_TEMP/success.md"
+          gh issue close "$ISSUE_NUMBER"
+
+      - name: 反馈失败原因并打 invalid 标签
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          {
+            echo "❌ 评论未能写入 data/comments.json，原因如下："
+            echo ""
+            echo '```'
+            if [ -f "$RUNNER_TEMP/ingest.log" ]; then tail -n 40 "$RUNNER_TEMP/ingest.log"; else echo "（没有日志）"; fi
+            echo '```'
+            echo ""
+            echo "请按冻结模板修改正文后重新提交：首行 <!-- comment-submission -->，随后四行依次以「- 板块: 」「- 目标: 」「- 昵称: 」「- 内容: 」开头。"
+          } > "$RUNNER_TEMP/failure.md"
+          gh label create invalid --color B60205 || true
+          gh issue comment "$ISSUE_NUMBER" --body-file "$RUNNER_TEMP/failure.md"
+          gh issue edit "$ISSUE_NUMBER" --add-label invalid || true
