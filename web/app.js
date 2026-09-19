@@ -37,6 +37,23 @@
   var COMMENT_MAX_CHARS = 1000;
   var REPO_PLACEHOLDER = 'OWNER/REPO';
 
+  /* 亮暗主题切换：手动选择持久化键（与 web/index.html 引导脚本共用，改键名需两处同步） */
+  var THEME_KEY = 'shuangxiu-theme';
+  var THEME_META_COLORS = { light: '#f5f6fa', dark: '#0e1016' };   /* 与 index.html 的 theme-color meta 保持一致 */
+
+  /* 共享信息（userdata）：所有人可提交的社区数据，写入由仓库 GitHub Action 完成（页面零密钥）。
+     文件挂载于 index.json 的 userCompanies / userSchools 数组（缺失时回退固定文件名）。
+     提交体 marker 与 fenced JSON 契约由 tools/ingest-userdata.mjs 消费，三方（此处/表单/Action）不得单独改动 */
+  var USERDATA_KEYS = { companies: 'userCompanies', schools: 'userSchools' };
+  var USERDATA_FALLBACK_FILES = { companies: 'userdata_company.json', schools: 'userdata_school.json' };
+  var USERDATA_MARKER = '<!-- userdata-submission -->';
+  var SHARED_STATE_KEY = 'shuangxiu-shared';
+  var SHARED_BADGE_LABEL = '共享';
+  var SHARED_STATUS_TOKENS = ['是', '否', '大小周', '不清楚'];
+  var SHARED_TEXT_MAX = 1000;
+  var SHARED_JOB_MAX = 80;
+  var NICKNAME_MAX = 40;     /* 昵称长度上限：评论与共享表单共用（ingest-comment / ingest-userdata 同为 40） */
+
   /* 约定键（SPEC §4.2）：仅用于视觉增强，键缺失时功能不受影响 */
   var TITLE_KEYS = ['名称'];
   var STATUS_KEYS = ['休息情况', '双休情况'];
@@ -81,6 +98,7 @@
     deepEntry: '',     /* URL 里的 entry 参数（深链待打开；打开/关闭后清空） */
     sort: 'default',
     status: '',
+    shared: false,     /* 共享信息开关：开启后合并 userdata_* 条目（localStorage 持久化） */
     offline: false,
     loaded: false,
     error: null
@@ -88,13 +106,14 @@
 
   /* 每个板块的数据视图：entries + 状态键（显式键或推导）+ 分类键 */
   var model = {
-    companies: { entries: [], statusKey: null, statusLabel: '', derived: true, categoryKey: null, statusValues: [], statusRank: {}, statusOf: null, total: 0 },
-    schools: { entries: [], statusKey: null, statusLabel: '', derived: false, categoryKey: null, statusValues: [], statusRank: {}, statusOf: null, total: 0 }
+    companies: { entries: [], sharedEntries: [], statusKey: null, statusLabel: '', derived: true, categoryKey: null, statusValues: [], statusRank: {}, statusOf: null, total: 0 },
+    schools: { entries: [], sharedEntries: [], statusKey: null, statusLabel: '', derived: false, categoryKey: null, statusValues: [], statusRank: {}, statusOf: null, total: 0 }
   };
 
   /* SPEC v1.3 §3.9：评论与条目解耦，靠「板块 + 目标」关联；site 提供提交配置 */
   model.comments = [];
-  model.site = { repo: '', issueLabel: '' };
+  model.site = { repo: '', issueLabel: '', userdataLabel: '' };
+  model.userTotal = 0;         /* userdata 条目总数（决定「共享信息」开关是否显示） */
 
   /* 抽屉运行时状态（SPEC §4.7.1） */
   var drawerState = { open: false, board: null, name: null, trigger: null };
@@ -252,7 +271,20 @@
     return [COMMENTS_FILE];
   }
 
-  /* 按索引顺序读取并合并：先索引，再按数组顺序并发拉取全部数据分片（含评论分片） */
+  /* 共享信息（userdata）分片名：索引缺省时回退固定文件名 */
+  function userShards(index, board) {
+    var arr = index && Array.isArray(index[USERDATA_KEYS[board]]) ? index[USERDATA_KEYS[board]] : null;
+    return arr && arr.length ? arr : [USERDATA_FALLBACK_FILES[board]];
+  }
+
+  function emptyShell(board) {
+    var shell = {};
+    shell[BOARDS[board].dataKey] = [];
+    return shell;
+  }
+
+  /* 按索引顺序读取并合并：先索引，再按数组顺序并发拉取全部数据分片（含评论分片）。
+     userdata 分片为「宽松加载」：缺失/非法/解析失败一律按空数据处理，不影响主数据展示 */
   function readAll(offline) {
     return readJson(INDEX_FILE, offline).then(function (index) {
       validateIndex(index);
@@ -260,19 +292,35 @@
       index.companies.forEach(function (n) { names.push({ board: 'companies', file: n }); });
       index.schools.forEach(function (n) { names.push({ board: 'schools', file: n }); });
       commentShards(index).forEach(function (n) { names.push({ board: 'comments', file: n }); });
+      ['companies', 'schools'].forEach(function (board) {
+        userShards(index, board).forEach(function (n) { names.push({ board: board, file: n, user: true }); });
+      });
       var tasks = names.map(function (item) {
-        return readJson(item.file, offline).then(function (data) {
+        var task = readJson(item.file, offline).then(function (data) {
           var key = BOARDS[item.board].dataKey;
           if (!isObject(data) || !Array.isArray(data[key])) {
             throw dataError(item.file + ' 顶层必须是 {"' + key + '": [...]}');
           }
           return { item: item, data: data };
         });
+        if (item.user) {
+          task = task.catch(function () { return { item: item, data: emptyShell(item.board) }; });
+        }
+        return task;
       });
       return Promise.all(tasks).then(function (results) {
-        var groups = { companies: [], schools: [], comments: [] };
+        /* 注意：分组键用小写 usercompanies / userschools——
+           下方的合并与 buildModel 均以 'user' + board（board 本身小写）动态取键，
+           驼峰键 userCompanies 永远匹配不上（曾导致 undefined.concat 崩溃） */
+        var groups = { companies: [], schools: [], comments: [], usercompanies: [], userschools: [] };
         results.forEach(function (r) {
-          groups[r.item.board] = groups[r.item.board].concat(r.data[BOARDS[r.item.board].dataKey]);
+          var key = BOARDS[r.item.board].dataKey;
+          if (r.item.user) {
+            var gk = 'user' + r.item.board;         /* userCompanies / userSchools */
+            groups[gk] = groups[gk].concat(r.data[key]);
+          } else {
+            groups[r.item.board] = groups[r.item.board].concat(r.data[key]);
+          }
         });
         return { index: index, groups: groups };
       });
@@ -310,10 +358,21 @@
    * ============================================================ */
 
   /* 公司板块：按岗位级「双休」聚合推导（前端推导，非原始字段，不写回数据）
-   *   同时存在 是 与 否 → 部分双休；只有 是 → 全部双休；只有 否 → 无双休；否则 未知 */
+   *   同时存在 是 与 否 → 部分双休；只有 是 → 全部双休；只有 否 → 无双休；否则 未知。
+   *   岗位缺失时回退顶层「休息情况 / 双休情况」标量（共享信息记录走此路径） */
+  function statusTokenOf(text) {
+    if (text === '是' || text === '双休' || text === '全部双休') { return 'yes'; }
+    if (text === '否' || text === '单休' || text === '无双休') { return 'no'; }
+    if (text === '大小周' || text === '部分' || text === '部分双休') { return 'partial'; }
+    return null;
+  }
+
   function deriveStatus(entry) {
-    var hasYes = false;
-    var hasNo = false;
+    var flags = { yes: false, no: false, partial: false };
+    function mark(text) {
+      var kind = statusTokenOf(text);
+      if (kind) { flags[kind] = true; }
+    }
     var jobs = entry[JOB_KEYS[0]];
     if (Array.isArray(jobs)) {
       for (var i = 0; i < jobs.length; i++) {
@@ -322,16 +381,19 @@
         for (var k = 0; k < JOB_STATUS_KEYS.length; k++) {
           var key = JOB_STATUS_KEYS[k];
           if (!hasOwn(job, key)) { continue; }
-          var token = scalarText(job[key]);
-          if (token === '是' || token === '双休' || token === '全部双休') { hasYes = true; }
-          else if (token === '否' || token === '单休' || token === '无双休') { hasNo = true; }
+          mark(scalarText(job[key]));
           break;
         }
       }
     }
-    if (hasYes && hasNo) { return '部分双休'; }
-    if (hasYes) { return '全部双休'; }
-    if (hasNo) { return '无双休'; }
+    if (!flags.yes && !flags.no && !flags.partial) {          /* 顶层标量兜底（无岗位数组时） */
+      for (var t = 0; t < STATUS_KEYS.length; t++) {
+        if (hasOwn(entry, STATUS_KEYS[t]) && isScalar(entry[STATUS_KEYS[t]])) { mark(scalarText(entry[STATUS_KEYS[t]])); }
+      }
+    }
+    if ((flags.yes && flags.no) || flags.partial) { return '部分双休'; }
+    if (flags.yes) { return '全部双休'; }
+    if (flags.no) { return '无双休'; }
     return '未知';
   }
 
@@ -383,7 +445,8 @@
 
   function resolveStatus(board) {
     var m = model[board];
-    var explicit = presentKeyOf(m.entries, STATUS_KEYS);
+    var all = m.entries.concat(m.sharedEntries || []);
+    var explicit = presentKeyOf(all, STATUS_KEYS);
     if (explicit) {
       m.derived = false;
       m.statusKey = explicit;
@@ -398,25 +461,52 @@
       m.statusOf = deriveStatus;
       return;
     }
-    var guess = discoverTokenKey(m.entries);     // 学校：退化为数据里的令牌键
+    var guess = discoverTokenKey(all);           // 学校：退化为数据里的令牌键（含共享条目）
     m.derived = false;
     m.statusKey = guess;
     m.statusLabel = guess || '';
     m.statusOf = guess ? function (entry) { return scalarText(entry[guess]); } : function () { return ''; };
   }
 
+  /* 共享条目合并：与主数据重名时复制并重命名「名称 → xx（共享）」，
+     保证 data-entry 外键（渲染/详情/评论目标）全局唯一且各处逻辑无需感知 */
+  function buildSharedEntries(board, baseEntries, rawShared) {
+    var shared = [];
+    (rawShared || []).forEach(function (entry) {
+      if (!isObject(entry)) { return; }
+      var name = nameOf(entry);
+      var taken = function (n) {
+        return baseEntries.some(function (b) { return nameOf(b) === n; }) ||
+          shared.some(function (s) { return nameOf(s) === n; });
+      };
+      if (taken(name) && hasOwn(entry, TITLE_KEYS[0]) && isScalar(entry[TITLE_KEYS[0]])) {
+        var copy = {};
+        Object.keys(entry).forEach(function (k) { copy[k] = entry[k]; });
+        var suffix = '（共享）';
+        while (taken(scalarText(copy[TITLE_KEYS[0]]) + suffix)) { suffix += '·'; }
+        copy[TITLE_KEYS[0]] = scalarText(copy[TITLE_KEYS[0]]) + suffix;
+        shared.push(copy);
+      } else {
+        shared.push(entry);
+      }
+    });
+    return shared;
+  }
+
   function buildModel(groups) {
     ['companies', 'schools'].forEach(function (board) {
       var m = model[board];
       m.entries = (groups[board] || []).filter(isObject);
+      m.sharedEntries = buildSharedEntries(board, m.entries, groups['user' + board]);
       m.total = m.entries.length;
       resolveStatus(board);
+      var all = m.entries.concat(m.sharedEntries);
       var exclude = TITLE_KEYS.concat(STATUS_KEYS, JOB_KEYS, REVIEW_KEYS, ['补课情况']);
-      m.categoryBadgeKey = presentKeyOf(m.entries, CATEGORY_KEYS);       /* 约定键：类别作标签 */
-      m.categoryKey = m.categoryBadgeKey || discoverCategoryKey(m.entries, exclude);
-      /* 状态取值清单（当前数据实际出现者）+ 稳定排序次序 */
+      m.categoryBadgeKey = presentKeyOf(all, CATEGORY_KEYS);             /* 约定键：类别作标签 */
+      m.categoryKey = m.categoryBadgeKey || discoverCategoryKey(all, exclude);
+      /* 状态取值清单（当前数据实际出现者，含共享条目，保证筛选下拉稳定）+ 稳定排序次序 */
       var values = [];
-      m.entries.forEach(function (entry) { uniquePush(values, m.statusOf(entry)); });
+      all.forEach(function (entry) { uniquePush(values, m.statusOf(entry)); });
       if (m.derived) {
         values.sort(function (a, b) { return DERIVED_ORDER.indexOf(a) - DERIVED_ORDER.indexOf(b); });
       } else if (m.categoryKey) {
@@ -429,7 +519,7 @@
       values.forEach(function (v, i) { m.statusRank[v] = i; });
     });
     model.comments = (groups.comments || []).filter(isObject);   /* §3.9 评论（与条目解耦） */
-    model.site = model.site || { repo: '', issueLabel: '' };
+    model.userTotal = model.companies.sharedEntries.length + model.schools.sharedEntries.length;
   }
 
   /* site 配置来自 index.json（§3.1）：repo 仍是占位符时禁用提交 */
@@ -437,7 +527,8 @@
     var site = isObject(index) && isObject(index.site) ? index.site : {};
     model.site = {
       repo: typeof site.repo === 'string' ? site.repo : '',
-      issueLabel: typeof site.issueLabel === 'string' ? site.issueLabel : ''
+      issueLabel: typeof site.issueLabel === 'string' ? site.issueLabel : '',
+      userdataLabel: typeof site.userdataLabel === 'string' ? site.userdataLabel : ''
     };
   }
 
@@ -478,10 +569,18 @@
     return nameOf(a).localeCompare(nameOf(b), 'zh-Hans-CN', { numeric: true, sensitivity: 'base' });
   }
 
+  /* 当前板块应展示的条目：主数据 +（开关开启时）共享条目 */
+  function entriesForBoard(board) {
+    var b = board || state.board;
+    var m = model[b];
+    if (!m) { return []; }
+    return state.shared && m.sharedEntries.length ? m.entries.concat(m.sharedEntries) : m.entries;
+  }
+
   function sortedEntries(list) {
     var m = model[state.board];
     var order = new Map();
-    m.entries.forEach(function (entry, i) { order.set(entry, i); });
+    entriesForBoard().forEach(function (entry, i) { order.set(entry, i); });
     function original(a, b) { return (order.get(a) || 0) - (order.get(b) || 0); }
     var arr = list.slice();
     if (state.sort === 'name') {
@@ -769,13 +868,14 @@
     var body = el('div', 'kv-body');
     var scalarRows = el('div', 'kv-body');
     var hasScalarRow = false;
+    var remarks = [];                    /* 备注：循环内只收集，循环后统一渲染（与 renderObject 行序一致） */
     var keys = Object.keys(entry);
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i];
       var value = entry[key];
       if (TITLE_KEYS.indexOf(key) >= 0) { continue; }
       if (REMARK_KEYS.indexOf(key) >= 0 && typeof value === 'string') {     /* 备注：引用样式段落 */
-        renderRemark(fragment, key, value);
+        remarks.push({ key: key, text: value });
         continue;
       }
       if (JOB_KEYS.indexOf(key) >= 0 && Array.isArray(value)) { renderJobs(body, value); continue; }
@@ -789,6 +889,7 @@
     }
     if (hasScalarRow) { fragment.appendChild(scalarRows); }
     if (body.childNodes.length) { fragment.appendChild(body); }
+    for (var r = 0; r < remarks.length; r++) { renderRemark(fragment, remarks[r].key, remarks[r].text); }
     return fragment;
   }
 
@@ -813,6 +914,9 @@
 
     var head = el('div', 'entry__head');
     head.appendChild(el('h3', 'entry__title', name));
+    if (m.sharedEntries.indexOf(entry) >= 0) {          /* 共享条目：社区数据，带独立徽标（颜色+文字） */
+      head.appendChild(el('span', 'badge badge--shared', SHARED_BADGE_LABEL));
+    }
     if (board === 'companies' && statusText) {          /* 企业：整体状态灯（绿/黄/红/灰 + 文字） */
       head.appendChild(buildLight(statusText, variant));
     }
@@ -832,12 +936,16 @@
     return card;
   }
 
-  /* 按名称定位条目（抽屉用）：公司/学校两个板块各自查找 */
+  /* 按名称定位条目（抽屉用）：先主数据后共享条目（重名时主数据优先） */
   function entryByName(board, name) {
     var m = model[board];
     if (!m) { return null; }
-    for (var i = 0; i < m.entries.length; i++) {
+    var i;
+    for (i = 0; i < m.entries.length; i++) {
       if (nameOf(m.entries[i]) === name) { return m.entries[i]; }
+    }
+    for (i = 0; i < m.sharedEntries.length; i++) {
+      if (nameOf(m.sharedEntries[i]) === name) { return m.sharedEntries[i]; }
     }
     return null;
   }
@@ -871,7 +979,10 @@
 
   function renderComments(board, name) {
     var list = byId('comment-list');
-    var empty = document.querySelector('.comment-empty');
+    /* 只在抽屉内部查找「暂无评论」占位：#state-region 里的条目提示曾复用 .comment-empty 类，
+       全局查询会把过期提示误当作评论区空态（现已换成 .entry-notice，此处仍限定抽屉内兜底） */
+    var drawer = drawerEl();
+    var empty = drawer ? drawer.querySelector('.comment-empty') : null;
     if (!list) { return; }
     list.textContent = '';
     var rows = commentsFor(board, name);
@@ -895,46 +1006,69 @@
     if (empty) { empty.hidden = rows.length > 0; }
   }
 
-  /* 提交按钮/提示：site.repo 未配置（占位 OWNER/REPO）时禁用并提示 */
-  function updateCommentFormState() {
-    var submit = byId('comment-submit');
-    var notice = byId('comment-notice');
-    var ready = repoConfigured();
-    if (submit) { submit.disabled = !ready; }
-    if (notice) {
-      if (notice.classList) { notice.classList.toggle('comment-form__hint--warn', !ready); }
-      notice.textContent = ready
-        ? '提交会打开 GitHub 新建 Issue 页面（需登录 GitHub 账号）；提交后由仓库的 GitHub Action 自动写入数据文件。'
-        : '需先在 data/index.json 的 site.repo 填写你的仓库';
-    }
-  }
+  /* ---------- Issue 提交表单公共助手：评论表单与共享表单共用，禁止再各自复制 ---------- */
 
-  function commentContentValue() {
-    var area = byId('comment-content');
-    return area && typeof area.value === 'string' ? area.value : '';
-  }
-
-  function commentNicknameValue() {
-    var input = byId('comment-nickname');
-    return input && typeof input.value === 'string' ? input.value.trim() : '';
-  }
-
-  function setCommentNotice(message, warn) {
-    var notice = byId('comment-notice');
+  /* 表单提示条：warn=true 时叠加警示色（comment-form__hint--warn） */
+  function setFormNotice(noticeId, message, warn) {
+    var notice = byId(noticeId);
     if (!notice) { return; }
     if (notice.classList) { notice.classList.toggle('comment-form__hint--warn', !!warn); }
     notice.textContent = message;
   }
 
-  /* 表单校验（§4.7.4）：内容必填、≤1000 字、repo 必须已配置 */
+  /* 提交按钮/提示基线：site.repo 未配置（占位 OWNER/REPO）时禁用并提示 */
+  function syncIssueFormState(submitId, noticeId, readyMessage) {
+    var submit = byId(submitId);
+    var ready = repoConfigured();
+    if (submit) { submit.disabled = !ready; }
+    setFormNotice(noticeId, ready ? readyMessage : '需先在 data/index.json 的 site.repo 填写你的仓库', !ready);
+  }
+
+  /* 预填 Issue 链接的公共尾部：所有提交渠道（评论/共享/未来扩展）统一走这里 */
+  function buildNewIssueUrl(title, body, label) {
+    return 'https://github.com/' + model.site.repo + '/issues/new'
+      + '?title=' + encodeURIComponent(title)
+      + '&body=' + encodeURIComponent(body)
+      + '&labels=' + encodeURIComponent(label);
+  }
+
+  /* 打开 GitHub 新建 Issue 页；弹窗被拦截时保留提示文案兜底 */
+  function openIssueSubmission(url) {
+    try { window.open(url, '_blank'); } catch (e) { /* ignore */ }
+  }
+
+  /* 表单取值（原始 / 去首尾空白） */
+  function formValueById(id) {
+    var input = byId(id);
+    return input && typeof input.value === 'string' ? input.value : '';
+  }
+
+  function formValueTrimmed(id) {
+    return formValueById(id).trim();
+  }
+
+  /* repo 已配置时两表单的就绪提示文案（提交成功后的提示与各自就绪文案一致） */
+  var COMMENT_READY_NOTICE = '提交会打开 GitHub 新建 Issue 页面（需登录 GitHub 账号）；提交后由仓库的 GitHub Action 自动写入数据文件。';
+  var SHARED_READY_NOTICE = '提交会打开 GitHub 新建 Issue 页面（需登录 GitHub 账号）；提交后由仓库的 GitHub Action 校验并写入 data/userdata_*.json。';
+
+  /* 提交按钮/提示：site.repo 未配置（占位 OWNER/REPO）时禁用并提示 */
+  function updateCommentFormState() {
+    syncIssueFormState('comment-submit', 'comment-notice', COMMENT_READY_NOTICE);
+  }
+
+  /* 表单校验（§4.7.4）：内容必填、≤1000 字、昵称 ≤40 字（与共享表单及 ingest 双工具一致）、repo 必须已配置 */
   function validateComment() {
-    var text = commentContentValue().trim();
+    var text = formValueTrimmed('comment-content');
     if (text === '') { return { ok: false, message: '请填写评论内容（不能为空）' }; }
     if (text.length > COMMENT_MAX_CHARS) {
       return { ok: false, message: '评论内容过长（最多 ' + COMMENT_MAX_CHARS + ' 字，当前 ' + text.length + ' 字）' };
     }
+    var nick = formValueTrimmed('comment-nickname');
+    if (nick.length > NICKNAME_MAX) {
+      return { ok: false, message: '昵称过长（最多 ' + NICKNAME_MAX + ' 字）' };
+    }
     if (!repoConfigured()) { return { ok: false, message: '需先在 data/index.json 的 site.repo 填写你的仓库' }; }
-    return { ok: true, text: text };
+    return { ok: true, text: text, nick: nick };
   }
 
   /* 预填 GitHub Issue 链接（§4.7.4 模板逐字冻结） */
@@ -946,28 +1080,107 @@
       + '- 目标: ' + name + '\n'
       + '- 昵称: ' + (nickname || '匿名') + '\n'
       + '- 内容: ' + text;
-    var label = model.site.issueLabel || 'comment-submission';
-    return 'https://github.com/' + model.site.repo + '/issues/new'
-      + '?title=' + encodeURIComponent(title)
-      + '&body=' + encodeURIComponent(body)
-      + '&labels=' + encodeURIComponent(label);
+    return buildNewIssueUrl(title, body, model.site.issueLabel || 'comment-submission');
   }
 
   function submitComment() {
     var check = validateComment();
-    if (!check.ok) { setCommentNotice(check.message, true); return null; }
-    var url = buildIssueUrl(drawerState.board, drawerState.name, check.text, commentNicknameValue());
-    setCommentNotice('已打开 GitHub 新建 Issue 页面（需登录 GitHub 账号）；提交后由仓库的 GitHub Action 自动写入数据文件。', false);
-    try { window.open(url, '_blank'); } catch (e) { /* 弹窗被拦截时保留链接文案 */ }
+    if (!check.ok) { setFormNotice('comment-notice', check.message, true); return null; }
+    var url = buildIssueUrl(drawerState.board, drawerState.name, check.text, check.nick);
+    setFormNotice('comment-notice', COMMENT_READY_NOTICE, false);
+    openIssueSubmission(url);
     return url;
   }
 
-  /* 深链/关闭时的轻量提示（不新增冻结 id，动态创建 role=status 段落） */
+  /* ---------- 共享信息表单（userdata）：页面零密钥，写入由仓库 GitHub Action 完成 ---------- */
+
+  function updateSharedFormState() {
+    syncIssueFormState('shared-submit', 'shared-notice', SHARED_READY_NOTICE);
+  }
+
+  function sharedFormValue(id, max, label) {
+    var v = formValueTrimmed(id);
+    if (v.length > max) { return { ok: false, message: label + '过长（最多 ' + max + ' 字）' }; }
+    return { ok: true, value: v };
+  }
+
+  function validateShared() {
+    if (!drawerState.open) { return { ok: false, message: '请先打开条目详情再提交共享信息' }; }
+    var status = formValueTrimmed('shared-status');
+    if (SHARED_STATUS_TOKENS.indexOf(status) < 0) { return { ok: false, message: '请选择双休情况' }; }
+    var text = sharedFormValue('shared-text', SHARED_TEXT_MAX, '说明');
+    if (!text.ok) { return text; }
+    if (text.value === '') { return { ok: false, message: '请填写说明（不能为空）' }; }
+    var job = sharedFormValue('shared-job', SHARED_JOB_MAX, '岗位/班级');
+    if (!job.ok) { return job; }
+    var nick = sharedFormValue('shared-nick', NICKNAME_MAX, '昵称');
+    if (!nick.ok) { return nick; }
+    if (!repoConfigured()) { return { ok: false, message: '需先在 data/index.json 的 site.repo 填写你的仓库' }; }
+    return { ok: true, status: status, text: text.value, job: job.value, nick: nick.value };
+  }
+
+  /* 本地时区日期（YYYY-MM-DD）：不用 toISOString（UTC），避免北京 0-8 点提交落到前一天 */
+  function localDateString() {
+    var now = new Date();
+    return now.getFullYear() + '-'
+      + ('0' + (now.getMonth() + 1)).slice(-2) + '-'
+      + ('0' + now.getDate()).slice(-2);
+  }
+
+  /* 提交体契约（tools/ingest-userdata.mjs 消费）：marker + ```json fenced 记录 ```
+     记录键：板块 / 目标 / 岗位 / 双休情况 / 说明 / 昵称 / 日期（改键需三处同步） */
+  function buildSharedIssueUrl(board, name, record) {
+    var boardLabel = BOARDS[board] ? BOARDS[board].label : board;
+    var title = '[共享信息] ' + boardLabel + '：' + name;
+    var body = USERDATA_MARKER + '\n\n```json\n' + JSON.stringify(record, null, 2) + '\n```\n';
+    return buildNewIssueUrl(title, body, model.site.userdataLabel || 'userdata-submission');
+  }
+
+  function submitShared() {
+    var check = validateShared();
+    if (!check.ok) { setFormNotice('shared-notice', check.message, true); return null; }
+    var record = {
+      '板块': BOARDS[drawerState.board].dataKey,
+      '目标': drawerState.name,
+      '岗位': check.job,
+      '双休情况': check.status,
+      '说明': check.text,
+      '昵称': check.nick || '匿名',
+      '日期': localDateString()
+    };
+    var url = buildSharedIssueUrl(drawerState.board, drawerState.name, record);
+    setFormNotice('shared-notice', SHARED_READY_NOTICE, false);
+    openIssueSubmission(url);
+    return url;
+  }
+
+  /* ---------- 共享信息开关（chip）：localStorage 持久化，无共享数据时隐藏 ---------- */
+
+  function initSharedState() {
+    var v = null;
+    try { v = window.localStorage.getItem(SHARED_STATE_KEY); } catch (e) { /* file:// 下可能被禁 */ }
+    state.shared = v === '1';
+  }
+
+  function syncSharedToggle() {
+    var chip = byId('shared-toggle');
+    if (!chip) { return; }
+    var hasData = model.userTotal > 0 && !state.offline;   /* 离线快照不含 userdata：隐藏开关 */
+    chip.hidden = !hasData;
+    if (!hasData) { state.shared = false; }
+    chip.setAttribute('aria-pressed', state.shared ? 'true' : 'false');
+    chip.title = state.shared
+      ? '当前展示：官方数据 + 社区共享信息（带「共享」徽标）。点击回到仅官方数据'
+      : '开启后合并展示所有人共享的信息（data/userdata_*.json），条目带「共享」徽标';
+  }
+
+  /* 深链/关闭时的轻量提示（不新增冻结 id，动态创建 role=status 段落）：
+     使用独立类名 .entry-notice，不复用评论区的 .comment-empty（两者样式与查询逻辑互不干扰） */
   function showEntryNotice(message) {
     var host = byId('state-region') || document.querySelector('.results') || document.body;
     var node = byId('entry-notice');
     if (!node) {
-      node = el('p', 'comment-empty', '');
+      node = el('p', 'entry-notice', '');
       node.id = 'entry-notice';
       node.setAttribute('role', 'status');
       host.insertBefore(node, host.firstChild);
@@ -1050,6 +1263,7 @@
     renderDrawerBody(board, entry);
     renderComments(board, name);
     updateCommentFormState();
+    updateSharedFormState();
     var title = byId('drawer-title');
     if (title) { title.textContent = name + ' · 详情'; }
     drawer.hidden = false;
@@ -1182,6 +1396,85 @@
     if (dom.searchClear) { dom.searchClear.hidden = state.rawQ === ''; }
   }
 
+  /* ---------- 排序与筛选按钮（弹出面板）：与页头排序/状态下拉共享同一 state ---------- */
+
+  function sortFilterSortOptions() {
+    var m = model[state.board];
+    var options = [
+      { value: 'default', label: '默认顺序' },
+      { value: 'name', label: '按名称' },
+      { value: 'status', label: m.derived ? '按状态' : (m.statusLabel ? '按' + m.statusLabel : '按状态') }
+    ];
+    if (state.board === 'companies' && m.categoryKey) { options.push({ value: 'category', label: '按' + m.categoryKey }); }
+    return options;
+  }
+
+  function makeSortFilterChip(label, pressed, onClick) {
+    var chip = el('button', 'chip', label);
+    chip.type = 'button';
+    chip.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+    chip.addEventListener('click', onClick);
+    return chip;
+  }
+
+  function syncSortFilterPanel() {
+    var panel = byId('sortfilter-panel');
+    if (!panel) { return; }
+    var sortsRoot = byId('sortfilter-sorts');
+    if (sortsRoot) {
+      sortsRoot.textContent = '';
+      sortFilterSortOptions().forEach(function (opt) {
+        sortsRoot.appendChild(makeSortFilterChip(opt.label, state.sort === opt.value, function () {
+          state.sort = opt.value;
+          applyView();
+        }));
+      });
+    }
+    var m = model[state.board];
+    var statusGroup = byId('sortfilter-status-group');
+    var statusRoot = byId('sortfilter-status');
+    var values = (m && m.statusValues) ? m.statusValues : [];
+    if (statusGroup) { statusGroup.hidden = values.length === 0; }
+    if (statusRoot) {
+      statusRoot.textContent = '';
+      statusRoot.appendChild(makeSortFilterChip('全部', state.status === '', function () {
+        state.status = '';
+        applyView();
+      }));
+      values.forEach(function (value) {
+        statusRoot.appendChild(makeSortFilterChip(value, state.status === value, function () {
+          state.status = state.status === value ? '' : value;   /* 再点一次取消筛选 */
+          applyView();
+        }));
+      });
+    }
+    /* 按钮文字摘要：显示当前生效的非默认排序/筛选 */
+    var label = byId('sortfilter-label');
+    if (label) {
+      var parts = [];
+      if (state.sort && state.sort !== 'default') {
+        var opts = sortFilterSortOptions();
+        for (var i = 0; i < opts.length; i++) {
+          if (opts[i].value === state.sort) { parts.push(opts[i].label.replace(/^按/, '')); break; }
+        }
+      }
+      if (state.status) { parts.push(state.status); }
+      label.textContent = parts.length ? '排序与筛选：' + parts.join(' · ') : '排序与筛选';
+    }
+  }
+
+  function closeSortFilterPanel(refocus) {
+    var panel = byId('sortfilter-panel');
+    var btn = byId('sortfilter-btn');
+    if (panel && !panel.hidden) {
+      panel.hidden = true;
+      if (btn) {
+        btn.setAttribute('aria-expanded', 'false');
+        if (refocus) { btn.focus(); }
+      }
+    }
+  }
+
   function renderList(list, total) {
     renderToken++;
     detailSeq = 0;                       /* 详情区 id 重新计数（重渲染后默认全部折叠） */
@@ -1237,16 +1530,11 @@
     return total;
   }
 
-  function totalJobCount(board) {
-    return visibleJobCount(model[board].entries);
-  }
-
-  function countText(hitCount, list) {
-    var m = model[state.board];
+  function countText(hitCount, list, allEntries) {
     if (state.board === 'companies') {
-      return '公司 ' + hitCount + ' 家 / 共 ' + m.total + ' 家 · 岗位 ' + visibleJobCount(list) + ' 条 / 共 ' + totalJobCount('companies') + ' 条';
+      return '公司 ' + hitCount + ' 家 / 共 ' + allEntries.length + ' 家 · 岗位 ' + visibleJobCount(list) + ' 条 / 共 ' + visibleJobCount(allEntries) + ' 条';
     }
-    return '学校 ' + hitCount + ' 所 / 共 ' + m.total + ' 所';
+    return '学校 ' + hitCount + ' 所 / 共 ' + allEntries.length + ' 所';
   }
 
   function applyView() {
@@ -1254,14 +1542,17 @@
     var m = model[state.board];
     syncStatusFilter();
     syncSortSelect();
+    syncSortFilterPanel();
     syncSearchControls();
     syncBoardButtons();
-    var filtered = m.entries.filter(matchesQuery).filter(matchesStatus);
+    syncSharedToggle();
+    var allEntries = entriesForBoard();
+    var filtered = allEntries.filter(matchesQuery).filter(matchesStatus);
     var list = sortedEntries(filtered);
     var count = byId('result-count');
-    if (count) { count.textContent = countText(list.length, list); }
+    if (count) { count.textContent = countText(list.length, list, allEntries); }
     setPhase(list.length ? 'ready' : 'empty');
-    renderList(list, m.total);
+    renderList(list, allEntries.length);
     writeUrl();
   }
 
@@ -1311,6 +1602,73 @@
       if (history && history.pushState) { history.pushState(null, '', url); return; }
       if (history && history.replaceState) { history.replaceState(null, '', url); }
     } catch (e) { /* file:// 下部分浏览器禁止改写历史记录，忽略即可 */ }
+  }
+
+  /* ============================================================
+   * 11. 亮暗主题切换：手动选择 > 跟随系统（未选择时实时跟随系统变化）
+   * CSS 端：深色样式由 html[data-theme="dark"] 属性驱动（styles.css 第 12 节）
+   * ============================================================ */
+
+  function storedTheme() {
+    try { return window.localStorage.getItem(THEME_KEY); } catch (e) { return null; }
+  }
+
+  function systemTheme() {
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
+  function currentTheme() {
+    return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  }
+
+  /* 手动切换后同步 theme-color meta（浏览器地址栏/状态栏颜色跟随主题而非系统） */
+  function updateThemeColorMeta(theme) {
+    var metas = document.querySelectorAll('meta[name="theme-color"]');
+    for (var i = 0; i < metas.length; i++) {
+      metas[i].setAttribute('content', THEME_META_COLORS[theme]);
+    }
+  }
+
+  function syncThemeToggle(theme) {
+    var btn = byId('theme-toggle');
+    if (!btn) { return; }
+    var nextLabel = theme === 'dark' ? '浅色' : '深色';   /* 按钮文字 = 点击后将切换到的主题 */
+    var text = btn.querySelector('.theme-toggle__text');
+    if (text) { text.textContent = nextLabel; }
+    btn.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+    btn.setAttribute('aria-label', '切换到' + nextLabel + '主题');
+    btn.setAttribute('title', '当前为' + (theme === 'dark' ? '深色' : '浅色') + '主题，点击切换到' + nextLabel + '主题');
+  }
+
+  function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    syncThemeToggle(theme);
+    updateThemeColorMeta(theme);
+  }
+
+  function initTheme() {
+    var stored = storedTheme();
+    applyTheme(stored === 'dark' || stored === 'light' ? stored : systemTheme());
+
+    var btn = byId('theme-toggle');
+    if (btn) {
+      btn.addEventListener('click', function () {
+        var next = currentTheme() === 'dark' ? 'light' : 'dark';
+        try { window.localStorage.setItem(THEME_KEY, next); } catch (e) { /* file:// 下可能被禁：仅本次会话生效 */ }
+        applyTheme(next);
+      });
+    }
+
+    /* 用户未手动选择时，跟随系统实时切换（旧 API addListener 兜底 Safari < 14） */
+    if (window.matchMedia) {
+      var mq = window.matchMedia('(prefers-color-scheme: dark)');
+      var onChange = function () {
+        var s = storedTheme();
+        if (s !== 'dark' && s !== 'light') { applyTheme(systemTheme()); }
+      };
+      if (mq.addEventListener) { mq.addEventListener('change', onChange); }
+      else if (mq.addListener) { mq.addListener(onChange); }
+    }
   }
 
   /* ============================================================
@@ -1371,13 +1729,26 @@
         submitComment();
       });
     }
+    /* 输入实时反馈（两表单对称）：仅拦截超长告警，其余恢复基线提示；
+       必填校验在提交时给出，避免输入过程中提示闪烁 */
     var contentArea = byId('comment-content');
     if (contentArea) {
       contentArea.addEventListener('input', function () {
-        var check = validateComment();
-        if (check.ok) { updateCommentFormState(); }
-        else if (contentArea.value.trim() === '') { setCommentNotice('请填写评论内容（不能为空）', true); }
-        else if (contentArea.value.trim().length > COMMENT_MAX_CHARS) { setCommentNotice('评论内容过长（最多 ' + COMMENT_MAX_CHARS + ' 字）', true); }
+        if (contentArea.value.length > COMMENT_MAX_CHARS) {
+          setFormNotice('comment-notice', '评论内容过长（最多 ' + COMMENT_MAX_CHARS + ' 字）', true);
+        } else {
+          updateCommentFormState();
+        }
+      });
+    }
+    var sharedTextArea = byId('shared-text');
+    if (sharedTextArea) {
+      sharedTextArea.addEventListener('input', function () {
+        if (sharedTextArea.value.length > SHARED_TEXT_MAX) {
+          setFormNotice('shared-notice', '说明过长（最多 ' + SHARED_TEXT_MAX + ' 字）', true);
+        } else {
+          updateSharedFormState();
+        }
       });
     }
 
@@ -1415,6 +1786,69 @@
       });
     }
 
+    /* 排序与筛选按钮：开合面板；点外部/Esc 关闭 */
+    var sortFilterBtn = byId('sortfilter-btn');
+    if (sortFilterBtn) {
+      sortFilterBtn.addEventListener('click', function (event) {
+        event.stopPropagation();
+        var panel = byId('sortfilter-panel');
+        if (!panel) { return; }
+        var open = panel.hidden;
+        panel.hidden = !open;
+        sortFilterBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+      document.addEventListener('click', function (event) {
+        var panel = byId('sortfilter-panel');
+        if (!panel || panel.hidden) { return; }
+        if (panel.contains(event.target) || sortFilterBtn.contains(event.target)) { return; }
+        closeSortFilterPanel(false);
+      });
+      document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape' || event.key === 'Esc') { closeSortFilterPanel(true); }
+      });
+    }
+
+    /* 离线快照 toast：右上角常驻，可手动关闭 */
+    var offlineClose = byId('offline-note-close');
+    if (offlineClose) {
+      offlineClose.addEventListener('click', function () {
+        var note = byId('offline-note');
+        if (note) { note.hidden = true; }
+      });
+    }
+
+    /* 公告弹窗：页头按钮开合；Esc / 点击遮罩 / 关闭按钮三种方式关闭，焦点归还触发按钮 */
+    var announceBtn = byId('announce-btn');
+    var announceModal = byId('announce-modal');
+    if (announceBtn && announceModal) {
+      var announceTrigger = null;
+      var openAnnounce = function () {
+        announceTrigger = announceBtn;
+        announceModal.hidden = false;
+        announceBtn.setAttribute('aria-expanded', 'true');
+        var closeBtn = byId('announce-modal-close');
+        if (closeBtn) { closeBtn.focus(); }
+      };
+      var closeAnnounce = function () {
+        if (announceModal.hidden) { return; }
+        announceModal.hidden = true;
+        announceBtn.setAttribute('aria-expanded', 'false');
+        if (announceTrigger) { announceTrigger.focus(); announceTrigger = null; }
+      };
+      announceBtn.addEventListener('click', function () {
+        if (announceModal.hidden) { openAnnounce(); } else { closeAnnounce(); }
+      });
+      announceModal.addEventListener('click', function (event) {
+        var target = event.target;
+        if (target && target.closest && target.closest('#announce-modal-close')) { closeAnnounce(); return; }
+        if (target === announceModal) { closeAnnounce(); }   /* 点击遮罩（overlay 本体） */
+      });
+      document.addEventListener('keydown', function (event) {
+        if (announceModal.hidden) { return; }
+        if (event.key === 'Escape' || event.key === 'Esc') { event.preventDefault(); closeAnnounce(); }
+      });
+    }
+
     var statusSelect = byId('status-filter-select');
     if (statusSelect) {
       statusSelect.addEventListener('change', function () {
@@ -1438,6 +1872,25 @@
       retry.addEventListener('click', function () { load(); });
     }
 
+    /* 共享信息开关：切换合并展示 userdata 条目并持久化 */
+    var sharedToggle = byId('shared-toggle');
+    if (sharedToggle) {
+      sharedToggle.addEventListener('click', function () {
+        state.shared = !state.shared;
+        try { window.localStorage.setItem(SHARED_STATE_KEY, state.shared ? '1' : '0'); } catch (e) { /* file:// 忽略 */ }
+        applyView();
+      });
+    }
+
+    /* 共享信息表单：校验 + 拼 Issue 链接（写入由仓库 Action 完成） */
+    var sharedForm = byId('shared-form');
+    if (sharedForm) {
+      sharedForm.addEventListener('submit', function (event) {
+        event.preventDefault();
+        submitShared();
+      });
+    }
+
     window.addEventListener('popstate', function () {
       readUrl();
       syncDrawerFromUrl();          /* 前进/后退：按 URL 打开或关闭抽屉（§4.7.1） */
@@ -1454,6 +1907,8 @@
   }
 
   function start() {
+    initTheme();                           /* 主题独立于数据加载，DOM 契约缺失时也要能切换 */
+    initSharedState();                     /* 共享开关偏好（生效在数据加载后的 applyView） */
     cacheDom();
     if (!dom.boardRoot) { return; }        // DOM 契约缺失时不抛错、不白屏
     readUrl();

@@ -13,8 +13,15 @@
   "comments": [
     "comments.json"
   ],
+  "userCompanies": [
+    "userdata_company.json"
+  ],
+  "userSchools": [
+    "userdata_school.json"
+  ],
   "site": {
     "repo": "OWNER/REPO",
-    "issueLabel": "comment-submission"
+    "issueLabel": "comment-submission",
+    "userdataLabel": "userdata-submission"
   }
 }

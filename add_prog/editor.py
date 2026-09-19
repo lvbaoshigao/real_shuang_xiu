@@ -335,6 +335,12 @@ def load_index(data_dir):
         spec = BOARDS[board_id]
         index[board_id] = sanitize_shard_names(raw.get(board_id), spec["base"], spec["label"], warnings)
     index["site"] = normalize_site(raw.get("site"), warnings)
+    # 共享信息 userdata 挂载（可选键）：原样保留合法数组，缺失时不注入默认值
+    # （该分片由 GitHub Action 管理；不保留会导致编辑器保存时抹掉挂载，前端共享链路失效）。
+    for key in ("userCompanies", "userSchools"):
+        values = raw.get(key)
+        if isinstance(values, list) and values and all(isinstance(v, str) and v for v in values):
+            index[key] = list(values)
     return index, warnings
 
 
@@ -347,15 +353,23 @@ def shard_names_for(index, board):
 
 
 def index_shard_names(index):
-    """index.json 列出的全部分片名（§3.1 六个顶层键中的三个分片数组）。"""
+    """index.json 列出的全部分片名（三板块分片数组 + 共享信息 userdata 分片数组）。
+
+    userCompanies / userSchools 由 GitHub Action（tools/ingest-userdata.mjs）管理，
+    编辑器不读写其内容，但一致性检查与保存时必须把它们视为已知分片，
+    否则 data/userdata_*.json 会被误报为「未被 index.json 列出的文件」。"""
     names = []
     for board_id in BOARD_ORDER:
         names.extend(shard_names_for(index, board_id))
+    for key in ("userCompanies", "userSchools"):
+        values = index.get(key) if isinstance(index, dict) else None
+        if isinstance(values, list):
+            names.extend(value for value in values if isinstance(value, str))
     return names
 
 
 def normalize_site(raw, warnings=None):
-    """§3.1：site = {repo: OWNER/REPO 形式, issueLabel: comment-submission}。"""
+    """§3.1：site = {repo: OWNER/REPO 形式, issueLabel: comment-submission, userdataLabel}。"""
     site = {"repo": DEFAULT_SITE_REPO, "issueLabel": DEFAULT_SITE_LABEL}
     if isinstance(raw, dict):
         repo = raw.get("repo")
@@ -370,6 +384,10 @@ def normalize_site(raw, warnings=None):
             site["issueLabel"] = label
         elif warnings is not None:
             warnings.append("index.json site.issueLabel 非法，已按 %s 处理。" % DEFAULT_SITE_LABEL)
+        # 共享信息 Issue 标签（site.userdataLabel）：透传保留，缺失时不补默认值（前端自行回退）。
+        userdata_label = raw.get("userdataLabel")
+        if isinstance(userdata_label, str) and userdata_label.strip() != "":
+            site["userdataLabel"] = userdata_label
     elif warnings is not None:
         warnings.append("index.json 缺少 site 对象，已按占位值处理（发布前请填写 site.repo）。")
     return site
@@ -430,18 +448,25 @@ def load_board(data_dir, board, index, warnings=None):
         records.extend(array)
     existing = sorted(name for name in os.listdir(data_dir) if name.lower().endswith(".json"))
     known = set([INDEX_FILENAME] + index_shard_names(index))
-    extra = [name for name in existing if name not in known]
+    extra = [name for name in existing if name not in known and not is_userdata_shard(name)]
     if extra:
         warnings.append("data/ 中存在未被 index.json 列出的文件：%s。" % "、".join(extra))
     return records, names
+
+
+def is_userdata_shard(name):
+    """共享信息分片（userdata_*.json）：由 GitHub Action 管理的可选文件，
+    未挂载但存在 / 已挂载但缺失，前端都能容错（回退固定文件名或按空数据处理），
+    因此一致性检查对这类文件始终放行。"""
+    return isinstance(name, str) and name.startswith("userdata_") and name.lower().endswith(".json")
 
 
 def data_dir_consistency(data_dir, index):
     """返回 (多余文件, 缺失文件)；索引 = 真实分片集合 = 加载顺序 三者必须一致。"""
     actual = sorted(name for name in os.listdir(data_dir) if name.lower().endswith(".json"))
     expected = sorted(set([INDEX_FILENAME] + index_shard_names(index)))
-    extra = [name for name in actual if name not in expected]
-    missing = [name for name in expected if name not in actual]
+    extra = [name for name in actual if name not in expected and not is_userdata_shard(name)]
+    missing = [name for name in expected if name not in actual and not is_userdata_shard(name)]
     return extra, missing
 
 
@@ -841,6 +866,13 @@ def save_board(data_dir, backup_dir, board, records, index=None, limits=None, do
         if not values:
             values = [BOARDS[board_id]["base"] + ".json"]
         updated_index[board_id] = values
+    # 共享信息 userdata 挂载键：编辑器不管理其分片内容，但保存时必须原样保留，
+    # 否则一旦经编辑器保存，index.json 会丢失 userCompanies/userSchools，
+    # 前端「共享信息」开关与 Action 写入链路全部失效（文件仍在 data/ 但索引不再列出）。
+    for key in ("userCompanies", "userSchools"):
+        values = index.get(key)
+        if isinstance(values, list) and values:
+            updated_index[key] = list(values)
     write_json_document(os.path.join(data_dir, INDEX_FILENAME), updated_index)
     extra, missing = data_dir_consistency(data_dir, updated_index)
     for file_name in missing:

@@ -8,6 +8,20 @@
 <meta name="theme-color" content="#0e1016" media="(prefers-color-scheme: dark)">
 <meta name="description" content="今天你双休了吗？公司板块与学校板块，按键渲染的纯静态查询站点：数据来自 data/index.json 索引的分片文件，零依赖、零外链、可离线打开。">
 <title>今天你双休了吗？— 公司与学校双休情况查询</title>
+<script>
+/* 主题引导：在样式表加载前解析 <html data-theme>，避免深色用户首帧闪白（FOUC）。
+   优先 localStorage 手动选择；未选择时跟随系统 prefers-color-scheme。
+   file:// 或隐私模式下 localStorage 可能抛异常：忽略即可，CSS 默认浅色。 */
+(function () {
+  try {
+    var t = localStorage.getItem('shuangxiu-theme');
+    if (t !== 'dark' && t !== 'light') {
+      t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.setAttribute('data-theme', t);
+  } catch (e) { /* 保持默认浅色 */ }
+})();
+</script>
 <link rel="stylesheet" href="styles.css">
 <!-- 空 data URI 图标：避免本地服务器与 Pages 上产生 favicon.ico 404 噪音；data: 不是外链 -->
 <link rel="icon" href="data:,">
@@ -16,19 +30,81 @@
 
 <a class="skip-link" href="#board-root">跳到条目列表</a>
 
-<!-- ===== 站点页头（F1）：标题与副标题为静态文案，不依赖任何数据 ===== -->
+<!-- ===== 站点页头（F1）：吸顶悬浮药丸 = 标题 + 搜索/状态/排序工具栏 + 主题切换 ===== -->
 <header class="site-header">
   <div class="wrap site-header__inner">
     <div class="site-header__brand">
-      <p class="site-eyebrow">公司与学校 · 双休情况</p>
       <h1 class="site-title">今天你双休了吗？</h1>
-      <p class="site-subtitle">收集公司岗位与学校作息的真实反馈，帮你判断这里是不是真的双休。</p>
     </div>
-    <ul class="site-facts">
-      <li class="site-fact"><span class="site-fact__key">数据来源</span><span class="site-fact__value">data/index.json</span></li>
-      <li class="site-fact"><span class="site-fact__key">运行方式</span><span class="site-fact__value">纯静态 · 零依赖</span></li>
-      <li class="site-fact"><span class="site-fact__key">部署</span><span class="site-fact__value">GitHub Pages 子路径</span></li>
-    </ul>
+
+    <!-- 工具栏（F6 / F7 / F8）：整合进药丸，随页头吸顶；字段 id 冻结，脚本无需改动 -->
+    <div class="toolbar" id="toolbar">
+      <div class="toolbar__inner" role="search" aria-label="搜索、筛选与排序">
+        <div class="field field--search">
+          <label class="field__label" for="search-input">关键词</label>
+          <div class="input-wrap">
+            <input class="input input--search" id="search-input" name="q" type="search"
+                   placeholder="搜索名称、休息情况、岗位、评价…"
+                   autocomplete="off" spellcheck="false" enterkeyhint="search" aria-keyshortcuts="Escape"
+                   aria-describedby="search-hint">
+            <button class="input__clear" id="search-clear" type="button" aria-label="清空关键词" hidden>
+              <span aria-hidden="true">×</span>
+            </button>
+          </div>
+          <span class="sr-only" id="search-hint">关键词。按 Esc 键可清空</span>
+        </div>
+
+        <!-- 无该键可筛选时由脚本加 hidden -->
+        <div class="field" id="status-filter">
+          <label class="field__label" for="status-filter-select">状态</label>
+          <div class="select-wrap">
+            <select class="input" id="status-filter-select" name="status">
+              <option value="">全部状态</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="field__label" for="sort-select">排序</label>
+          <div class="select-wrap">
+            <select class="input" id="sort-select" name="sort">
+              <option value="default">默认顺序</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- 排序与筛选按钮：弹出面板（排序方式 + 状态筛选 chips），与上方两个下拉共享同一状态 -->
+        <div class="field field--sortfilter">
+          <button class="sortfilter-btn" id="sortfilter-btn" type="button"
+                  aria-haspopup="true" aria-expanded="false" aria-controls="sortfilter-panel">
+            <span class="sortfilter-btn__glyph" aria-hidden="true">⇅</span>
+            <span class="sortfilter-btn__label" id="sortfilter-label">排序与筛选</span>
+          </button>
+          <div class="sortfilter-panel" id="sortfilter-panel" hidden>
+            <div class="sortfilter-group">
+              <p class="sortfilter-group__title">排序</p>
+              <div class="sortfilter-chips" id="sortfilter-sorts"></div>
+            </div>
+            <div class="sortfilter-group" id="sortfilter-status-group" hidden>
+              <p class="sortfilter-group__title">状态筛选</p>
+              <div class="sortfilter-chips" id="sortfilter-status"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 公告按钮：点开弹窗展示公告内容（原公告栏改版） -->
+    <button class="announce-btn" id="announce-btn" type="button"
+            aria-haspopup="dialog" aria-expanded="false" aria-controls="announce-modal">
+      <span class="announce-btn__glyph" aria-hidden="true">📢</span>
+      <span class="announce-btn__text">公告</span>
+    </button>
+
+    <button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false" aria-label="切换到深色主题">
+      <span class="theme-toggle__glyph" aria-hidden="true"></span>
+      <span class="theme-toggle__text">深色</span>
+    </button>
   </div>
 </header>
 
@@ -47,46 +123,13 @@
       <button class="board-switch__btn" type="button" data-board="companies" aria-pressed="true">公司</button>
       <button class="board-switch__btn" type="button" data-board="schools" aria-pressed="false">学校</button>
     </div>
+    <!-- 共享信息开关：开启后合并展示 data/userdata_*.json（所有人可提交的社区共享数据，带「共享」徽标） -->
+    <button class="chip" id="shared-toggle" type="button" aria-pressed="false"
+            title="开启后合并展示所有人共享的信息（data/userdata_*.json），条目带「共享」徽标">
+      共享信息
+    </button>
     <p class="board-bar__hint">切换板块后，关键词、状态与排序都会作用于当前板块的数据。</p>
   </section>
-
-  <!-- ===== 工具栏（F6 / F7 / F8）：>=1024px 顶部粘性 ===== -->
-  <div class="toolbar" id="toolbar">
-    <div class="toolbar__inner" role="search" aria-label="搜索、筛选与排序">
-      <div class="field field--search">
-        <label class="field__label" for="search-input">关键词</label>
-        <div class="input-wrap">
-          <input class="input input--search" id="search-input" name="q" type="search"
-                 placeholder="名称、休息情况、岗位、评价内容…"
-                 autocomplete="off" spellcheck="false" enterkeyhint="search" aria-keyshortcuts="Escape"
-                 aria-describedby="search-hint">
-          <button class="input__clear" id="search-clear" type="button" aria-label="清空关键词" hidden>
-            <span aria-hidden="true">×</span>
-          </button>
-        </div>
-        <span class="sr-only" id="search-hint">按 Esc 键可清空关键词</span>
-      </div>
-
-      <div class="field">
-        <label class="field__label" for="sort-select">排序</label>
-        <div class="select-wrap">
-          <select class="input" id="sort-select" name="sort">
-            <option value="default">默认（数据顺序）</option>
-          </select>
-        </div>
-      </div>
-
-      <!-- 无该键可筛选时由脚本加 hidden -->
-      <div class="field" id="status-filter">
-        <label class="field__label" for="status-filter-select">状态</label>
-        <div class="select-wrap">
-          <select class="input" id="status-filter-select" name="status">
-            <option value="">全部状态</option>
-          </select>
-        </div>
-      </div>
-    </div>
-  </div>
 
   <!-- ===== 结果区（F9 计数 + F10 四类状态 + F3/F4 挂载点） ===== -->
   <section class="results" id="results" aria-labelledby="results-title">
@@ -97,13 +140,6 @@
 
     <div class="board-root-holder">
       <div class="state-region" id="state-region">
-        <!-- 离线快照提示（SPEC §4.3）：file:// 下由脚本移除 hidden -->
-        <div class="state-panel state-panel--offline" id="offline-note" role="status" hidden>
-          <span class="state-panel__icon" aria-hidden="true">i</span>
-          <p class="state-panel__title">离线快照模式</p>
-          <p class="state-panel__hint">浏览器不允许以 <code>file://</code> 打开时读取 <code>data/*.json</code>，当前展示的是内置只读快照 <code>web/data-snapshot.js</code>。要查看最新数据，请在仓库根目录运行 <code>python -m http.server 8000</code> 后访问 <code>web/index.html</code>。</p>
-        </div>
-
         <!-- 状态一：加载中 -->
         <div class="state-panel state-panel--loading" id="state-loading" role="status">
           <span class="spinner" aria-hidden="true"></span>
@@ -134,6 +170,18 @@
   </section>
 </main>
 
+<!-- 离线快照提示（SPEC §4.3）：file:// 下由脚本移除 hidden；右上角常驻 toast，可手动关闭 -->
+<div class="offline-toast" id="offline-note" role="status" hidden>
+  <span class="offline-toast__icon" aria-hidden="true">i</span>
+  <div class="offline-toast__body">
+    <p class="offline-toast__title">离线快照模式</p>
+    <p class="offline-toast__hint">浏览器不允许以 <code>file://</code> 读取 <code>data/*.json</code>，当前展示内置只读快照。要查看最新数据，请在仓库根目录运行 <code>python -m http.server 8000</code> 后访问 <code>web/index.html</code>。</p>
+  </div>
+  <button class="offline-toast__close" id="offline-note-close" type="button" aria-label="关闭离线快照提示">
+    <span aria-hidden="true">×</span>
+  </button>
+</div>
+
 <footer class="site-footer">
   <div class="wrap site-footer__inner">
     <p class="site-footer__note">
@@ -146,6 +194,31 @@
     </p>
   </div>
 </footer>
+
+<!-- ===== 公告弹窗：由页头「公告」按钮触发；内容来自仓库根目录 gonggao.txt（已并入，源文本可删除） ===== -->
+<div class="announce-modal" id="announce-modal" role="dialog" aria-modal="true" aria-labelledby="announce-modal-title" hidden>
+  <div class="announce-modal__card">
+    <header class="announce-modal__head">
+      <h2 class="announce-modal__title" id="announce-modal-title">
+        <span class="announce-modal__tag" aria-hidden="true">公告</span>
+        十分欢迎您为双休项目添砖加瓦
+      </h2>
+      <button class="announce-modal__close" id="announce-modal-close" type="button" aria-label="关闭公告">
+        <span aria-hidden="true">×</span>
+      </button>
+    </header>
+    <div class="announce-modal__body">
+      <ul class="announce-modal__list">
+        <li>如果你想直接在网页端参与编辑，你需要准备一个 GitHub API key，但是在此之前，你需要拿到编辑权限。</li>
+        <li>你可以向 <a href="mailto:realsxproject@outlook.com">realsxproject@outlook.com</a> 发送请求，其中包括保证不会对项目进行破坏，否则将会回收你的权限。</li>
+        <li>当然你认为这很麻烦，你也可以直接把你所知道的信息发送到这个邮箱，也可以提交 issues，我将在看到后的第一时间同步更改。</li>
+        <li>你必须在更改的时候遵循 json 文件的规范，并且不能随意碰相关的网页代码。</li>
+        <li>十分建议将所有更改写入 <code>/data/userdata_*.json</code> 的文件，并且不要修改别人的更改，不允许打广告。</li>
+      </ul>
+      <p class="announce-modal__outro">再次感谢你为此项目做的贡献。</p>
+    </div>
+  </div>
+</div>
 
 <!-- ===== F13 / F14 全屏详情抽屉与评论（SPEC v1.3 §4.1 DOM 钩子 + §4.7）：默认 hidden，由脚本控制 =====
      语义归属：SPEC §4.1 / §4.7.1 把 role="dialog" / aria-modal="true" 冻结在抽屉容器 #drawer 上，故此处落在 #drawer；
@@ -182,6 +255,43 @@
         </div>
         <button class="comment-form__submit" id="comment-submit" type="submit" disabled>提交评论</button>
         <p class="comment-form__hint comment-form__hint--warn" id="comment-notice">需先在 data/index.json 的 site.repo 填写你的仓库</p>
+      </form>
+    </section>
+
+    <!-- ===== 共享信息表单：提交 → GitHub Issue → 仓库 Action 校验后写入 data/userdata_*.json =====
+         页面零密钥：写入由服务端（GitHub Actions）完成，浏览器不持有任何 token -->
+    <section class="detail__shared" aria-labelledby="detail-shared-title">
+      <h3 class="detail__shared-title" id="detail-shared-title">共享我了解的信息</h3>
+      <p class="detail__shared-hint">提交后经仓库的 GitHub Action 自动校验并写入 <code>data/userdata_*.json</code>，站点将带「共享」徽标展示。页面不持有任何密钥。</p>
+      <form class="comment-form" id="shared-form" novalidate>
+        <div class="comment-form__field">
+          <label class="comment-form__label" for="shared-status">双休情况（必选）</label>
+          <div class="select-wrap">
+            <select class="input" id="shared-status" name="status">
+              <option value="是">双休（周末正常休息）</option>
+              <option value="否">无双休</option>
+              <option value="大小周">大小周</option>
+              <option value="不清楚">不清楚</option>
+            </select>
+          </div>
+        </div>
+        <div class="comment-form__field">
+          <label class="comment-form__label" for="shared-job">岗位 / 班级（可选，最多 80 字）</label>
+          <input class="comment-form__nick" id="shared-job" name="job" type="text" maxlength="80"
+                 placeholder="如：后端开发 / 高一（不填则记录为整体情况）">
+        </div>
+        <div class="comment-form__field">
+          <label class="comment-form__label" for="shared-text">说明（必填，最多 1000 字）</label>
+          <textarea class="comment-form__text" id="shared-text" name="text" rows="4" maxlength="1000" required
+                    placeholder="描述真实的作息安排，如每周休息时间、加班/补课情况…"></textarea>
+        </div>
+        <div class="comment-form__field">
+          <label class="comment-form__label" for="shared-nick">昵称（可选，最多 40 字）</label>
+          <input class="comment-form__nick" id="shared-nick" name="nick" type="text" maxlength="40"
+                 autocomplete="nickname" placeholder="留空则显示「匿名」">
+        </div>
+        <button class="comment-form__submit" id="shared-submit" type="submit" disabled>提交共享信息</button>
+        <p class="comment-form__hint comment-form__hint--warn" id="shared-notice">需先在 data/index.json 的 site.repo 填写你的仓库</p>
       </form>
     </section>
   </div>
