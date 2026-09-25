@@ -17,11 +17,15 @@
     data/index.json     顶层四键：version=1、limits={maxRecordsPerFile:100, maxBytesPerFile:262144}、
                         companies=[分片文件名…]、schools=[分片文件名…]（数组顺序 = 加载顺序）
     data/companies.json 顶层键「公司」→ 条目数组：名称（必填，1–80 字，同板块内唯一）/
-                        类别（必填：制造业 / 消费零售·餐饮 / 新能源汽车 / 互联网·科技）/
+                        类别（必填，v1.3.3 起 16 项：互联网·科技 / 通信运营·设备 / 制造业 /
+                        食品·饮料 / 新能源汽车 / 餐饮·茶饮 / 零售·商超 / 快递物流 / 交通出行 /
+                        能源·电力·矿业 / 医疗健康·医药 / 金融·专业服务 / 建筑施工 / 教育培训 /
+                        生活服务·公共事业 / 公共管理·政务）/
                         岗位（必填的非空数组）[{岗位名称(必填), 双休(是/否/未知，可省略),
                         八小时工作制(是/否/未知，可省略), 情况(原文，可省略)}] /
                         备注(可选) / 评价[{编号, 内容}]
-    data/schools.json   顶层键「学校」→ 条目数组：名称 / 双休情况 / 补课情况 / 评价[{编号, 内容}]
+    data/schools.json   顶层键「学校」→ 条目数组：名称 / 阶段(初中/高中/完全中学/中职/高校) /
+                        地区(省·市) / 双休情况 / 补课情况 / 评价[{编号, 内容}]
 
 单文件上限（100 条记录 / 262144 字节，先到为准）超限时拆分为 companies-N.json / schools-N.json：
 序号从 1 连续递增、无前导 0，每个分片自身也不得超限；拆分后不带编号的原文件必须删除，
@@ -29,7 +33,7 @@
 
 编辑器行为（E1–E8）
 -------------------
-    E1 启动定位到脚本同级 ../data，默认 index.json + companies.json，可用对话框选择 data/ 下的 JSON
+    E1 启动定位到脚本同级 ../data，默认加载 index.json 与公司板块（分片由 index.json 决定），可用对话框选择 data/ 下的 JSON
     E2 公司 / 学校两个板块，按 index.json 的数组顺序拼接多分片为可编辑列表，保存时按 §3.5 回写
     E3 条目新增 / 删除 / 重命名 / 上移 / 下移；名称非空（1–80 字）且同一板块内不重复
     E4 岗位子表与评价子表的增删改与上下移；保存时「评价.编号」按当前顺序从 1 自动重排
@@ -57,7 +61,24 @@ SNAPSHOT_RELATIVE = os.path.join("web", "data-snapshot.js")
 
 DEFAULT_LIMITS = {"maxRecordsPerFile": 100, "maxBytesPerFile": 262144}
 NAME_MAX = 80
-COMPANY_CATEGORY_VALUES = ["制造业", "消费零售·餐饮", "新能源汽车", "互联网·科技"]
+COMPANY_CATEGORY_VALUES = [
+    "互联网·科技",
+    "通信运营·设备",
+    "制造业",
+    "食品·饮料",
+    "新能源汽车",
+    "餐饮·茶饮",
+    "零售·商超",
+    "快递物流",
+    "交通出行",
+    "能源·电力·矿业",
+    "医疗健康·医药",
+    "金融·专业服务",
+    "建筑施工",
+    "教育培训",
+    "生活服务·公共事业",
+    "公共管理·政务",
+]
 YES_NO_UNKNOWN_VALUES = ["是", "否", "未知"]
 NOT_SET = "（未设置）"
 BOARD_ORDER = ["companies", "schools", "comments"]
@@ -1482,7 +1503,7 @@ class EditorApp(object):
             self._show_filter(False)
             self._show_tab(self.tab_jobs, True)
             self._show_tab(self.tab_reviews, True)
-            detail = "类别必选（制造业 / 消费零售·餐饮 / 新能源汽车 / 互联网·科技），岗位至少一条且岗位名称不得重复"
+            detail = "类别必选（%s），岗位至少一条且岗位名称不得重复" % " / ".join(COMPANY_CATEGORY_VALUES)
             self.form_hint_var.set("名称必填、同一板块内不得重复（1–80 字）；%s。" % detail)
         elif kind == "school":
             self.name_row.grid()
@@ -2444,8 +2465,9 @@ class EditorApp(object):
                 [
                     "板块：公司（data/companies.json）与学校（data/schools.json），分片由 data/index.json 决定。",
                     "",
-                    "公司条目：名称（必填，1–80 字，同一板块内不重复）、类别（必填：制造业 / 消费零售·餐饮 /",
-                    "　　　　　新能源汽车 / 互联网·科技）、岗位（必填的非空数组；岗位名称必填且同一公司内不重复，",
+                    "公司条目：名称（必填，1–80 字，同一板块内不重复）、类别（必填，取值：",
+                    "　　　　　" + " / ".join(COMPANY_CATEGORY_VALUES) + "）、",
+                    "　　　　　岗位（必填的非空数组；岗位名称必填且同一公司内不重复，",
                     "　　　　　双休 / 八小时工作制 为 是/否/未知 或留空表示省略，情况为原文可留空）、备注（可选，多行）、",
                     "　　　　　评价子表（内容必填，编号保存时按顺序从 1 自动重排）。",
                     "学校条目：名称（同上）、双休情况（必填）、补课情况（可留空）、评价子表。",

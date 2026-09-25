@@ -5,7 +5,8 @@
     "maxBytesPerFile": 262144
   },
   "companies": [
-    "companies.json"
+    "companies-1.json",
+    "companies-2.json"
   ],
   "schools": [
     "schools.json"

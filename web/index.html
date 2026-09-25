@@ -89,6 +89,10 @@
               <p class="sortfilter-group__title">状态筛选</p>
               <div class="sortfilter-chips" id="sortfilter-status"></div>
             </div>
+            <div class="sortfilter-group" id="sortfilter-category-group" hidden>
+              <p class="sortfilter-group__title">分类筛选</p>
+              <div class="sortfilter-chips" id="sortfilter-category"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -128,6 +132,11 @@
             title="开启后合并展示所有人共享的信息（data/userdata_*.json），条目带「共享」徽标">
       共享信息
     </button>
+    <!-- 收藏开关：只显示已星标条目；收藏清单存本机 localStorage（favNames），无收藏时由脚本隐藏 -->
+    <button class="chip" id="fav-toggle" type="button" aria-pressed="false"
+            title="只显示已收藏（星标）的条目；收藏清单保存在本机浏览器">
+      只看收藏
+    </button>
     <p class="board-bar__hint">切换板块后，关键词、状态与排序都会作用于当前板块的数据。</p>
   </section>
 
@@ -137,6 +146,9 @@
       <h2 class="section-title" id="results-title">结果</h2>
       <p class="result-count" id="result-count" aria-live="polite" aria-atomic="true">0 / 0</p>
     </div>
+
+    <!-- 统计概览条：状态/分类计数 chips（点击即筛选），由脚本按当前板块渲染 -->
+    <div class="stats-strip" id="stats-strip" hidden></div>
 
     <div class="board-root-holder">
       <div class="state-region" id="state-region">

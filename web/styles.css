@@ -1081,6 +1081,31 @@ html[data-theme="dark"] .theme-toggle__glyph::before { content: "☀"; }        
 .entry__more:active { background: var(--surface-3); }
 .entry__more:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 
+/* 收藏星标：卡片头部星形切换按钮（aria-pressed 驱动实/空心，F5 冗余：颜色 + 字形双通道） */
+.entry__fav {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.entry__fav:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.entry__fav:active { transform: scale(0.92); }
+.entry__fav:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.entry__fav[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.entry__fav-glyph { pointer-events: none; }
+
 /* 详情区：展开时有独立分区（浅底 + 分隔线），首帧过渡 <= 200ms */
 .entry__details {
   display: flex;
@@ -1739,3 +1764,38 @@ html[data-theme="dark"] body.app {
   .results { animation-delay: 160ms; }
   .site-footer { animation-delay: 240ms; }
 }
+
+/* ---------- 16. 统计概览条：状态/分类计数 chips（点击即筛选） ----------
+   数字为板块全量口径（不受当前筛选影响，作为「还有多少」的稳定参照）；
+   状态 chips 复用四态语义色变量，深色模式由既有令牌自动适配。 */
+.stats-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-5);
+  margin-bottom: var(--sp-3);
+}
+.stats-strip[hidden] { display: none; }
+.stats-strip__group { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-2); }
+.stats-strip__title {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-2);
+}
+.chip--stat { gap: 0.35rem; }
+.chip--stat__count {
+  min-width: 1.4em;
+  padding: 0 0.45em;
+  border-radius: var(--radius-pill);
+  background: var(--border);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  line-height: 1.5;
+  text-align: center;
+}
+.chip--stat[aria-pressed="true"] .chip--stat__count { background: rgba(255, 255, 255, 0.28); }
+/* 状态四态语义色（与 .badge--* 同源令牌） */
+.chip--stat--yes { color: var(--yes-fg); }
+.chip--stat--no { color: var(--no-fg); }
+.chip--stat--partial { color: var(--partial-fg); }
+.chip--stat--unknown { color: var(--unknown-fg); }

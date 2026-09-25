@@ -53,13 +53,14 @@
   var SHARED_TEXT_MAX = 1000;
   var SHARED_JOB_MAX = 80;
   var NICKNAME_MAX = 40;     /* 昵称长度上限：评论与共享表单共用（ingest-comment / ingest-userdata 同为 40） */
+  var FAV_STATE_KEY = 'shuangxiu-favs';   /* 收藏：localStorage 持久化 {companies:[名称],schools:[名称]} */
 
   /* 约定键（SPEC §4.2）：仅用于视觉增强，键缺失时功能不受影响 */
   var TITLE_KEYS = ['名称'];
   var STATUS_KEYS = ['休息情况', '双休情况'];
   var JOB_KEYS = ['岗位'];
   var REVIEW_KEYS = ['评价'];
-  var CATEGORY_KEYS = ['类别', '类型', '行业', '性质', '地区', '城市', '省份'];
+  var CATEGORY_KEYS = ['类别', '类型', '行业', '性质', '阶段', '地区', '城市', '省份'];
   var REMARK_KEYS = ['备注'];                      /* 引用样式段落（承载负面舆情） */
   /* 岗位子表内可能承载「是否双休」信息的键（数据形态两种都要兼容） */
   var JOB_STATUS_KEYS = ['双休', '双休情况', '周末双休', '休息情况'];
@@ -98,6 +99,8 @@
     deepEntry: '',     /* URL 里的 entry 参数（深链待打开；打开/关闭后清空） */
     sort: 'default',
     status: '',
+    category: '',      /* 分类筛选：分类键取值（如公司「类别」），URL 参数 category 同步 */
+    favOnly: false,    /* 只看收藏：会话内开关（收藏清单本身持久化） */
     shared: false,     /* 共享信息开关：开启后合并 userdata_* 条目（localStorage 持久化） */
     offline: false,
     loaded: false,
@@ -106,8 +109,8 @@
 
   /* 每个板块的数据视图：entries + 状态键（显式键或推导）+ 分类键 */
   var model = {
-    companies: { entries: [], sharedEntries: [], statusKey: null, statusLabel: '', derived: true, categoryKey: null, statusValues: [], statusRank: {}, statusOf: null, total: 0 },
-    schools: { entries: [], sharedEntries: [], statusKey: null, statusLabel: '', derived: false, categoryKey: null, statusValues: [], statusRank: {}, statusOf: null, total: 0 }
+    companies: { entries: [], sharedEntries: [], statusKey: null, statusLabel: '', derived: true, categoryKey: null, statusValues: [], statusRank: {}, statusOf: null, categoryValues: [], categoryOf: null, total: 0 },
+    schools: { entries: [], sharedEntries: [], statusKey: null, statusLabel: '', derived: false, categoryKey: null, statusValues: [], statusRank: {}, statusOf: null, categoryValues: [], categoryOf: null, total: 0 }
   };
 
   /* SPEC v1.3 §3.9：评论与条目解耦，靠「板块 + 目标」关联；site 提供提交配置 */
@@ -517,6 +520,15 @@
       m.statusValues = values;
       m.statusRank = {};
       values.forEach(function (v, i) { m.statusRank[v] = i; });
+      /* 分类取值清单（当前数据实际出现者，含共享条目）：分类筛选 chips 与统计条的数据源 */
+      var cats = [];
+      var ckey = m.categoryKey;
+      if (ckey) { all.forEach(function (entry) { if (isScalar(entry[ckey])) { uniquePush(cats, scalarText(entry[ckey])); } }); }
+      cats.sort(function (a, b) { return a.localeCompare(b, 'zh-Hans-CN'); });
+      m.categoryValues = cats;
+      m.categoryOf = ckey
+        ? function (entry) { return isScalar(entry[ckey]) ? scalarText(entry[ckey]) : ''; }
+        : null;
     });
     model.comments = (groups.comments || []).filter(isObject);   /* §3.9 评论（与条目解耦） */
     model.userTotal = model.companies.sharedEntries.length + model.schools.sharedEntries.length;
@@ -535,6 +547,44 @@
   function repoConfigured() {
     var repo = model.site.repo;
     return typeof repo === 'string' && repo !== '' && repo !== REPO_PLACEHOLDER && repo.indexOf('/') > 0;
+  }
+
+  /* ---------- 收藏（localStorage）：卡片星标 + 「只看收藏」开关 ----------
+     清单结构 {companies:[名称], schools:[名称]}；名称即 nameOf（共享重名条目已带「（共享）」后缀，天然唯一）。 */
+
+  var favNames = { companies: [], schools: [] };
+
+  function initFavs() {
+    try {
+      var raw = window.localStorage.getItem(FAV_STATE_KEY);
+      if (!raw) { return; }
+      var data = JSON.parse(raw);
+      ['companies', 'schools'].forEach(function (board) {
+        if (isObject(data) && Array.isArray(data[board])) {
+          favNames[board] = data[board].filter(function (n) { return typeof n === 'string' && n !== ''; });
+        }
+      });
+    } catch (e) { /* 损坏或不可用（隐私模式等）：按空收藏处理 */ }
+  }
+
+  function isFav(board, name) { return favNames[board].indexOf(name) >= 0; }
+
+  function toggleFav(board, name) {
+    var list = favNames[board];
+    var idx = list.indexOf(name);
+    if (idx >= 0) { list.splice(idx, 1); } else { list.push(name); }
+    try { window.localStorage.setItem(FAV_STATE_KEY, JSON.stringify(favNames)); } catch (e) { /* 静默降级：本次会话内生效 */ }
+    return idx < 0;
+  }
+
+  function syncFavToggle() {
+    var chip = byId('fav-toggle');
+    if (!chip) { return; }
+    var count = favNames[state.board].length;
+    chip.hidden = count === 0 && !state.favOnly;   /* 当前板块无收藏时隐藏（避免点了切板块落空） */
+    chip.setAttribute('aria-pressed', state.favOnly ? 'true' : 'false');
+    chip.title = '只显示已收藏（星标）的条目；收藏清单保存在本机浏览器（当前 ' + count + ' 条）';
+    chip.textContent = state.favOnly ? '只看收藏 · ' + count : '只看收藏';
   }
 
   /* ============================================================
@@ -563,6 +613,22 @@
   function matchesStatus(entry) {
     if (!state.status) { return true; }
     return model[state.board].statusOf(entry) === state.status;
+  }
+
+  /* 分类筛选：无分类键/无取值的条目视为空串，不命中任何已选分类（「全部」时空串照常通过） */
+  function categoryOf(entry) {
+    var m = model[state.board];
+    return m.categoryKey && isScalar(entry[m.categoryKey]) ? scalarText(entry[m.categoryKey]) : '';
+  }
+
+  function matchesCategory(entry) {
+    if (!state.category) { return true; }
+    return categoryOf(entry) === state.category;
+  }
+
+  function matchesFav(entry) {
+    if (!state.favOnly) { return true; }
+    return isFav(state.board, nameOf(entry));
   }
 
   function compareName(a, b) {
@@ -925,6 +991,25 @@
       if (bubbles) { head.appendChild(bubbles); }
     }
     var actions = el('div', 'entry__actions');
+    /* 收藏星标：aria-pressed + 实/空心双通道（F5）；「只看收藏」下取消收藏即移除卡片 */
+    var favBtn = el('button', 'entry__fav');
+    favBtn.type = 'button';
+    var faved = isFav(board, name);
+    var favGlyph = el('span', 'entry__fav-glyph', faved ? '★' : '☆');
+    favBtn.setAttribute('aria-pressed', faved ? 'true' : 'false');
+    favBtn.setAttribute('aria-label', faved ? '取消收藏 ' + name : '收藏 ' + name);
+    favBtn.title = faved ? '取消收藏（收藏清单保存在本机浏览器）' : '收藏该条目（清单保存在本机浏览器）';
+    favBtn.appendChild(favGlyph);
+    favBtn.addEventListener('click', function () {
+      var added = toggleFav(board, name);
+      favBtn.setAttribute('aria-pressed', added ? 'true' : 'false');
+      favBtn.setAttribute('aria-label', added ? '取消收藏 ' + name : '收藏 ' + name);
+      favBtn.title = added ? '取消收藏（收藏清单保存在本机浏览器）' : '收藏该条目（清单保存在本机浏览器）';
+      favGlyph.textContent = added ? '★' : '☆';
+      syncFavToggle();
+      if (state.favOnly && !added) { applyView(); }   /* 只看收藏模式下取消收藏：该卡片随之移除 */
+    });
+    actions.appendChild(favBtn);
     var more = el('button', 'entry__more', board === 'schools' ? '更多' : '更多信息');
     more.type = 'button';
     more.setAttribute('data-more', name);               /* SPEC §4.1 冻结属性（V13） */
@@ -1448,6 +1533,24 @@
         }));
       });
     }
+    /* 分类筛选 chips：与状态 chips 同一交互约定（再点一次取消） */
+    var catGroup = byId('sortfilter-category-group');
+    var catRoot = byId('sortfilter-category');
+    var cats = m ? (m.categoryValues || []) : [];
+    if (catGroup) { catGroup.hidden = cats.length === 0; }
+    if (catRoot) {
+      catRoot.textContent = '';
+      catRoot.appendChild(makeSortFilterChip('全部', state.category === '', function () {
+        state.category = '';
+        applyView();
+      }));
+      cats.forEach(function (value) {
+        catRoot.appendChild(makeSortFilterChip(value, state.category === value, function () {
+          state.category = state.category === value ? '' : value;
+          applyView();
+        }));
+      });
+    }
     /* 按钮文字摘要：显示当前生效的非默认排序/筛选 */
     var label = byId('sortfilter-label');
     if (label) {
@@ -1459,6 +1562,7 @@
         }
       }
       if (state.status) { parts.push(state.status); }
+      if (state.category) { parts.push(state.category); }
       label.textContent = parts.length ? '排序与筛选：' + parts.join(' · ') : '排序与筛选';
     }
   }
@@ -1508,7 +1612,7 @@
     var empty = byId('state-empty');
     if (!empty) { return; }
     var hint = empty.querySelector('.state-panel__hint');
-    var hasFilter = state.rawQ !== '' || state.status !== '';
+    var hasFilter = state.rawQ !== '' || state.status !== '' || state.category !== '' || state.favOnly;
     if (hint) {
       hint.textContent = total === 0
         ? '当前板块的数据为空（data/ 中该板块暂无条目）。可运行 python add_prog/editor.py 添加数据后再刷新。'
@@ -1537,20 +1641,79 @@
     return '学校 ' + hitCount + ' 所 / 共 ' + allEntries.length + ' 所';
   }
 
+  /* ---------- 统计概览条：状态/分类计数 chips（点击即筛选，数字为板块全量口径） ---------- */
+
+  function statChip(label, count, pressed, onClick, variantClass) {
+    var chip = el('button', 'chip chip--stat' + (variantClass ? ' ' + variantClass : ''));
+    chip.type = 'button';
+    chip.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+    chip.title = pressed ? '取消筛选「' + label + '」' : '筛选「' + label + '」';
+    chip.addEventListener('click', onClick);
+    chip.appendChild(el('span', 'chip--stat__label', label));
+    chip.appendChild(el('span', 'chip--stat__count', String(count)));
+    return chip;
+  }
+
+  function syncStats(allEntries) {
+    var strip = byId('stats-strip');
+    if (!strip) { return; }
+    if (!allEntries.length) { strip.hidden = true; strip.textContent = ''; return; }
+    var m = model[state.board];
+    strip.hidden = false;
+    strip.textContent = '';
+    var statusCounts = {};
+    var catCounts = {};
+    var ckey = m.categoryKey;
+    allEntries.forEach(function (entry) {
+      var s = m.statusOf(entry);
+      if (s !== '') { statusCounts[s] = (statusCounts[s] || 0) + 1; }
+      if (ckey && isScalar(entry[ckey])) {
+        var v = scalarText(entry[ckey]);
+        catCounts[v] = (catCounts[v] || 0) + 1;
+      }
+    });
+    var statusGroup = el('div', 'stats-strip__group');
+    statusGroup.appendChild(el('span', 'stats-strip__title', '状态'));
+    m.statusValues.forEach(function (value) {
+      if (!statusCounts[value]) { return; }
+      var variant = hasOwn(TOKEN_VARIANT, value) ? ' chip--stat--' + TOKEN_VARIANT[value] : '';
+      statusGroup.appendChild(statChip(value, statusCounts[value], state.status === value, function () {
+        state.status = state.status === value ? '' : value;   /* 再点一次取消筛选 */
+        applyView();
+      }, variant));
+    });
+    strip.appendChild(statusGroup);
+    if (m.categoryValues.length) {
+      var catGroup = el('div', 'stats-strip__group');
+      catGroup.appendChild(el('span', 'stats-strip__title', m.categoryKey));
+      m.categoryValues.forEach(function (value) {
+        if (!catCounts[value]) { return; }
+        catGroup.appendChild(statChip(value, catCounts[value], state.category === value, function () {
+          state.category = state.category === value ? '' : value;   /* 再点一次取消筛选 */
+          applyView();
+        }));
+      });
+      strip.appendChild(catGroup);
+    }
+  }
+
   function applyView() {
     if (!state.loaded) { return; }
     var m = model[state.board];
+    if (state.category && m.categoryValues.indexOf(state.category) < 0) { state.category = ''; }   /* 分类取值失效即重置 */
     syncStatusFilter();
     syncSortSelect();
     syncSortFilterPanel();
     syncSearchControls();
     syncBoardButtons();
     syncSharedToggle();
+    syncFavToggle();
     var allEntries = entriesForBoard();
-    var filtered = allEntries.filter(matchesQuery).filter(matchesStatus);
+    var filtered = allEntries.filter(matchesQuery).filter(matchesStatus).filter(matchesCategory).filter(matchesFav);
     var list = sortedEntries(filtered);
     var count = byId('result-count');
     if (count) { count.textContent = countText(list.length, list, allEntries); }
+    syncStats(allEntries);
     setPhase(list.length ? 'ready' : 'empty');
     renderList(list, allEntries.length);
     writeUrl();
@@ -1571,16 +1734,18 @@
     var sort = params.get('sort');
     if (sort) { state.sort = sort; }
     state.status = params.get('status') || '';
+    state.category = params.get('category') || '';
     state.deepEntry = (params.get('entry') || '').trim();   /* 深链：抽屉目标条目名 */
   }
 
-  /* 统一构造 URL：board / q / sort / status +（抽屉打开时）entry —— §4.7.1 */
+  /* 统一构造 URL：board / q / sort / status / category +（抽屉打开时）entry —— §4.7.1 */
   function buildUrl(withEntry) {
     var params = new URLSearchParams();
     if (state.board !== 'companies') { params.set('board', state.board); }
     if (state.rawQ) { params.set('q', state.rawQ); }   /* URL 保留原始大小写 */
     if (state.sort && state.sort !== 'default') { params.set('sort', state.sort); }
     if (state.status) { params.set('status', state.status); }
+    if (state.category) { params.set('category', state.category); }
     var entryName = drawerState.name || state.deepEntry;      /* 深链未打开时也保留 entry 参数 */
     if (withEntry && entryName) { params.set('entry', entryName); }
     var query = params.toString();
@@ -1863,6 +2028,17 @@
         state.rawQ = '';
         state.q = '';
         state.status = '';
+        state.category = '';
+        state.favOnly = false;
+        applyView();
+      });
+    }
+
+    /* 只看收藏开关：会话内切换（收藏清单本身持久化，见 toggleFav） */
+    var favToggle = byId('fav-toggle');
+    if (favToggle) {
+      favToggle.addEventListener('click', function () {
+        state.favOnly = !state.favOnly;
         applyView();
       });
     }
@@ -1908,6 +2084,7 @@
 
   function start() {
     initTheme();                           /* 主题独立于数据加载，DOM 契约缺失时也要能切换 */
+    initFavs();                            /* 收藏清单：localStorage 读取失败时按空收藏处理 */
     initSharedState();                     /* 共享开关偏好（生效在数据加载后的 applyView） */
     cacheDom();
     if (!dom.boardRoot) { return; }        // DOM 契约缺失时不抛错、不白屏
